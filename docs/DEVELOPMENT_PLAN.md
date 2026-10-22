@@ -1,0 +1,265 @@
+# EmoWall AI V0.1 分阶段开发计划
+
+> 原则：**每阶段必须有可复现的验收标准**，验收通过并提交 Git 后才进入下一阶段。
+> 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0 已完成，等待确认进入 Stage 1）。
+
+**命令约定**：以下命令均在项目根目录执行，`$PY` 表示项目虚拟环境解释器
+`.\.venv\Scripts\python.exe`（本机裸 `python` 与 `py` 可能指向别的解释器，不要使用）。
+
+---
+
+## 总览
+
+| 阶段 | 主题 | 交付物 | 预计工作量 | 状态 |
+| --- | --- | --- | --- | --- |
+| 0 | 环境审计与项目骨架 | 目录、规范、计划、Git | 0.5 天 | ✅ 完成 |
+| 1 | 配置系统 | `emowall/config` | 0.5 天 | ⬜ 待确认 |
+| 2 | AI 核心 | `emowall/ai` | 1 天 | ⬜ |
+| 3 | SQLite 存储 | `emowall/storage` | 0.5 天 | ⬜ |
+| 4 | 情绪系统 | `emowall/emotion` | 0.5 天 | ⬜ |
+| 5 | GUI 集成 | `emowall/gui`、`emowall/app.py` | 1.5 天 | ⬜ |
+| 6 | 打包与 V0.1 验收 | PyInstaller EXE、验收报告 | 1 天 | ⬜ |
+
+合计约 5 个工作日（按每天 4~6 小时有效编码估算）。
+
+依赖顺序：`1 → 2 → 3 → 4 → 5 → 6`。其中 2 只依赖 1 的数据结构；3、4 可与 2 并行，但为降低协作成本按顺序推进。
+
+---
+
+## Stage 0 — 环境审计与项目骨架 ✅
+
+**目标**：在没有写任何业务代码前，确认环境可用、把工程规矩立起来。
+
+**交付物**
+
+- `README.md`、`AGENTS.md`、`requirements.txt`、`.gitignore`、`.gitattributes`、`pytest.ini`
+- `docs/ARCHITECTURE.md`、`docs/DEVELOPMENT_PLAN.md`、`docs/ENVIRONMENT_AUDIT.md`
+- `scripts/check_env.py`（仅标准库的环境自检）
+- `emowall/` 包骨架（各层 `__init__.py` 只有职责说明，无业务代码）
+- `tests/test_architecture.py`（架构守护）、`tests/test_package.py`
+- Git 仓库初始化 + 首次提交
+
+**验收标准**
+
+1. 目录结构与 `docs/ARCHITECTURE.md` 一致（6 个包目录：`emowall` 与 `ai / config / storage / emotion / gui`，均含 `__init__.py`）。
+2. `$PY scripts\check_env.py` 逐项输出 Python / 依赖 / git / ollama / Ollama API / 本地模型 / 模型目录 / 应用数据目录 的 PASS / WARN / FAIL，退出码 0（无 FAIL）或 1（有 FAIL）。
+3. `$PY -m pytest` 全绿（架构守护测试通过）。
+4. `git log --oneline` 至少有 1 条提交，`git status` 干净。
+5. 仓库中不存在 `*.db`、`.venv`、`build/`、`dist/`、密钥文件。
+
+---
+
+## Stage 1 — 配置系统
+
+**目标**：让「Ollama 地址 / 模型 / 上下文预算」可配置、可持久化、可损坏恢复，为后续所有层提供唯一事实来源。
+
+**交付物**
+
+- `emowall/config/paths.py`：`default_app_data_dir()`（`%APPDATA%\EmoWall`，`EMOWALL_HOME` 可覆盖）
+- `emowall/config/settings.py`：`OllamaSettings / ChatSettings / AppSettings`（frozen dataclass + 校验）
+- `emowall/config/store.py`：`ConfigStore.load()` / `save()`（原子写入、损坏备份回退）
+- `tests/test_config.py`（≥ 10 个用例）
+
+**技术要点**
+
+- 默认值集中在 `defaults()`，不散落。
+- 校验：URL 必须 `http/https` 且非空；`num_ctx ≥ 1024`；`temperature ∈ [0, 2]`；超时 > 0。
+- 未知字段忽略并 `logging.warning`；`version` 字段预留升级位。
+- 不 import `httpx`/Qt；只用标准库。
+
+**验收标准**
+
+1. 首次运行自动生成 `config.json`（默认值），再次加载结果一致（round-trip）。
+2. 删除文件 → 返回默认值，不抛异常。
+3. 写坏 JSON → 备份为 `config.corrupt-*.json`，返回默认值，日志有 warning。
+4. 非法值（`base_url=""`、`temperature=9`）→ 抛 `ConfigValidationError` 且不写盘。
+5. 写入过程先写临时文件再 `os.replace`：人为中断不会留下半截 JSON。
+6. `EMOWALL_HOME` 指向临时目录时，配置文件落在该目录（测试隔离）。
+7. `$PY -m pytest` 全绿；`grep -rn "PySide6" emowall/config` 无结果。
+
+---
+
+## Stage 2 — AI 核心
+
+**目标**：把「连 Ollama、流式说话、多轮上下文、随时取消」做成与界面无关、可移植的核心。
+
+**交付物**
+
+- `emowall/ai/errors.py`：`AIError` 及 4 个子类
+- `emowall/ai/models.py`：`ChatMessage / ChatChunk / GenerationStats`
+- `emowall/ai/cancel.py`：`CancelToken`
+- `emowall/ai/client.py`：`OllamaClient`（`version / list_models / stream_chat`，NDJSON 解析）
+- `emowall/ai/engine.py`：`ChatEngine`（上下文裁剪、系统提示、`stream_reply`）
+- `scripts/chat_probe.py`：命令行联调工具（Ctrl+C 取消）
+- `tests/test_ai_client.py`、`tests/test_ai_engine.py`（MockTransport，全部离线）
+- `tests/test_ai_integration.py`（`@pytest.mark.integration`，真实 Ollama，默认跳过）
+
+**技术要点**
+
+- `httpx.Client(timeout=httpx.Timeout(connect=..., read=..., write=..., pool=...))`。
+- 流解析：`for line in response.iter_lines()` → `json.loads`；空行跳过；单行解析失败记 warning 不中断（除非整段无有效数据）。
+- `{"error": ...}` → 按状态码/文本分类成 `ModelNotFoundError` 或 `OllamaUnavailableError`。
+- 取消：`CancelToken` 记录活动 response，`cancel()` 置位并 `response.close()`；读循环把 `httpx.ReadError/StreamClosed` + 已取消 → `CancelledError`。
+- 上下文裁剪：先按条数、再按字符预算，从最旧开始丢；`system` 永不丢；最后一条用户消息永不丢。
+- 不做 tokenizer，不做重试风暴（连接失败直接报错，由 UI 提示）。
+
+**验收标准**
+
+1. `$PY -m pytest` 全绿（默认已排除 integration），且**全程无真实网络**（可用断网复跑验证）。
+2. Mock 用例覆盖：正常多块拼接、`done` 统计字段、`error` 字段、HTTP 404/500、连接拒绝、半行断流、取消发生在第 2 块之后。
+3. 取消语义：`token.cancel()` 后生成器在 500 ms 内抛 `CancelledError`，且已产出的块数被准确记录。
+4. 上下文：构造 60 条历史 + 预算 6000 字符，断言发送给 client 的消息满足条数/字符上限，且 system 与最后一条用户消息保留。
+5. 真实联调：启动 Ollama 后 `$PY scripts\chat_probe.py --prompt "你好"` 逐字打印；按 Ctrl+C 立即停止且不打印堆栈。
+6. `$PY -m pytest -m integration`（Ollama 已启动）通过；若当时还没有 integration 用例，退出码 5 属正常（未选到用例）。
+7. `$PY -c "import emowall.ai"` 在**未安装 PySide6 的纯环境**下可导入（验证核心零 Qt 依赖）。
+8. `git grep -n "PySide6" -- emowall/ai` 无结果。
+
+---
+
+## Stage 3 — SQLite 存储
+
+**目标**：会话与消息可靠落盘，重启后可恢复；存储层完全不知道 AI 的存在。
+
+**交付物**
+
+- `emowall/storage/database.py`：连接、PRAGMA、建表、`user_version` 迁移
+- `emowall/storage/models.py`：`Conversation / MessageRecord`
+- `emowall/storage/repository.py`：`ConversationRepository`
+- `tests/test_storage.py`（≥ 15 个用例，临时目录 DB）
+
+**技术要点**
+
+- `sqlite3.connect(..., check_same_thread=False)` + 模块级锁：**写操作只在 GUI 工作线程执行**，主线程仅做单条短读（会话列表、消息加载）；每个操作短事务，`busy_timeout=2000`。
+- WAL + `foreign_keys=ON` + `busy_timeout=5000`。
+- 时间 UTC ISO-8601；会话 `updated_at` 在追加消息时更新。
+- 删除会话级联删除消息；`list_messages` 按 `id` 正序。
+
+**验收标准**
+
+1. 空目录首次打开自动建库建表，`PRAGMA user_version` 为 1。
+2. 建会话 → 追加 3 条消息 → 重启（重新打开连接）后顺序、内容、角色完全一致。
+3. `list_recent(limit)` 按 `updated_at` 倒序；`limit` 生效。
+4. 删除会话后其消息数为 0（级联生效），其他会话不受影响。
+5. `emotion/emotion_intensity` 可为 NULL，写入后原样读回。
+6. 同一会话第 1 条用户消息自动生成标题（≤ 20 字），空内容回退为「新会话」。
+7. 并发场景最小验证：两个连接交替读写不报 `database is locked`（WAL + busy_timeout=2000 生效）。
+8. `$PY -m pytest` 全绿；`grep -rn "PySide6\|httpx" emowall/storage` 无结果。
+
+---
+
+## Stage 4 — 情绪系统
+
+**目标**：把回复文本映射成 5 种基础表情，纯函数、确定性、可单测，为未来壁纸提供情绪信号。
+
+**交付物**
+
+- `emowall/emotion/labels.py`：`Emotion` 枚举 + `presentation()`（名称 / emoji / 主色）
+- `emowall/emotion/detector.py`：`detect_emotion(text) -> EmotionResult`
+- `emowall/emotion/lexicon.py`：中英文关键词表（每类 ≥ 12 个）
+- `tests/test_emotion.py`（表驱动，≥ 25 组输入）
+
+**技术要点**
+
+- 打分 = Σ 命中词权重（emoji 1.5 / 强词 1.0 / 弱词 0.5）；最高分 ≤ 0 或并列 → `calm`。
+- 否定短语（`不开心`、`不高兴`、`没意思`、`not happy`）优先映射到 `sad`。
+- 强度 `min(1.0, score / 3.0)`；返回命中词元组便于调试与未来调参。
+- 纯标准库、无 I/O、无随机、无时间依赖。
+
+**验收标准**
+
+1. 5 个类别各有正例全部命中；20 条中性文本全部判定为 `calm`。
+2. 表驱动用例覆盖：单关键词、多类别混合（取最高分）、否定短语、emoji、空串/纯空白、超长文本（10k 字不异常）。
+3. 同输入连续调用 100 次结果完全相同（确定性）。
+4. 强度恒在 `[0, 1]`，且 `matched_keywords` 是命中词的子集。
+5. `presentation()` 对 5 类均返回非空名称、单个 emoji、`#RRGGBB` 颜色。
+6. `$PY -m pytest` 全绿；`emowall/emotion` 无 Qt / httpx / sqlite 依赖。
+
+---
+
+## Stage 5 — GUI 集成
+
+**目标**：一个真正好用、不卡顿、能取消、能恢复历史的最小聊天界面。
+
+**交付物**
+
+- `emowall/gui/main_window.py`：主窗口（三栏：会话列表 / 消息区 / 输入区）
+- `emowall/gui/chat_view.py`：消息气泡渲染（含流式追加、自动滚动、错误条）
+- `emowall/gui/session_panel.py`：新建 / 切换 / 重命名 / 删除会话
+- `emowall/gui/settings_dialog.py`：地址、模型（下拉取自 `/api/tags`）、温度、上下文预算
+- `emowall/gui/emotion_widget.py`：5 表情指示器（emoji + 名称 + 主色）
+- `emowall/gui/worker.py`：`ChatWorker(QObject)` + `QThread` 编排与取消
+- `emowall/app.py`：组合根（`python -m emowall` 入口）
+- `emowall/__main__.py`
+- `tests/test_gui_imports.py`（无显示器环境下只做导入/结构守护，不跑事件循环）
+
+**技术要点**
+
+- 主线程只做 UI；`ChatWorker` 通过 `moveToThread` 运行，信号：`chunk(str) / finished(stats, emotion) / failed(str) / cancelled()`。
+- 「生成中」状态：发送键变「停止」，输入框保留可编辑但不可重复发送。
+- 冷启动提示：首块到达前显示「模型加载中…」（因为 qwen3:8b 冷启动约 40 s）。
+- 失败分类提示：连接失败 → 「Ollama 未启动？点击查看启动方法」；模型缺失 → 「模型未安装」+ 建议命令。
+- 关闭窗口：若有生成中任务，先取消 + `wait(3s)`，再关库退出。
+
+**验收标准**
+
+1. `$PY -m emowall` 启动主窗口，默认读取配置；无 Ollama 时窗口正常打开并显示可理解的错误提示（不崩溃）。
+2. 提问后回复**逐字流入**气泡；生成过程中窗口可拖动/切换会话（证明主线程未阻塞）。
+3. 冷启动（先 `ollama stop qwen3:8b`）首问显示「加载中」，40 s 内不误判失败。
+4. 点击「停止」→ 1 s 内停止输出，已生成部分保留在界面且入库；再次发送正常。
+5. 新建会话 → 对话 → 关闭应用 → 重启 → 会话出现在列表，点开历史消息与表情完整恢复。
+6. 修改设置（地址填错 / 模型换名）→ 保存后立即生效；错误地址给出提示，不崩溃。
+7. 每条 AI 回复后有 5 种表情之一显示，且与 `emotion` 层的单测结论一致。
+8. `$PY -m pytest` 全绿；`grep -rn "PySide6" emowall/ai emowall/storage emowall/config emowall/emotion` 无结果。
+9. 人工检查：无空白窗格、无占位文字、长消息自动换行横向不滚动、滚动条跟随到底部。
+
+---
+
+## Stage 6 — 打包与 V0.1 验收
+
+**目标**：双击即可运行的 Windows EXE，并完成 V0.1 功能验收清单。
+
+**交付物**
+
+- `build/emowall.spec`（PyInstaller 配置：`--noconsole`、onedir、排除无用 Qt 模块）
+- `scripts/build_exe.ps1`（一键构建 + 版本号 + 产物校验）
+- `docs/RELEASE_V0.1.md`（构建步骤、实测体积、启动时间、已知限制）
+- `docs/ACCEPTANCE_V0.1.md`（10 项功能需求逐条验收记录）
+- 根目录 `main.py`（打包入口）
+
+**技术要点**
+
+- 先用 **onedir**（启动快、误报少），再评估 `--onefile`；两者都记录体积。
+- 排除 `PySide6.QtWebEngine*`、`Qt3D`、`QtMultimedia` 等未用模块以缩小体积。
+- 用户数据不进安装目录：仍写 `%APPDATA%\EmoWall`。
+- 版本信息：文件属性里写入 `0.1.0`、产品名 `EmoWall AI`。
+
+**验收标准**
+
+1. `.\scripts\build_exe.ps1` 成功产出 `dist\EmoWallAI\EmoWallAI.exe`，构建日志无 ERROR。
+2. 双击 EXE 无控制台窗口，主界面正常显示；冷启动 ≤ 8 s（本机实测并记录）。
+3. EXE 内完成一次真实对话（流式 + 取消 + 表情 + 历史恢复），与源码运行表现一致。
+4. 删除 `%APPDATA%\EmoWall` 后首次运行自动重建配置与数据库。
+5. 产物中不含 `.py` 源码、不含密钥、不含本机绝对路径（抽查 `strings` 与 `config`）。
+6. `docs/ACCEPTANCE_V0.1.md` 中 10 项功能需求全部勾选并附证据（截图/日志/命令）。
+7. 打 tag `v0.1.0`，提交信息符合约定；README 更新「运行方式（源码 / EXE）」。
+
+---
+
+## 风险与应对
+
+| 风险 | 影响 | 应对 |
+| --- | --- | --- |
+| 冷启动 40 s 被误判为卡死 | 用户以为崩溃、重复点击 | 「加载中」状态 + 取消可用 + 不设首包短超时（已写入架构） |
+| 取消时 httpx 在另一线程关闭响应 | 偶发异常未分类 | Stage 2 专项测试：取消点覆盖读块中/加载中；统一映射 `CancelledError` |
+| OneDrive 同步 `.venv` / `.git` | 文件锁、同步冲突 | `.gitignore` 已排除；建议暂停该目录同步或迁移到 `C:\dev\` |
+| PySide6 体积大、打包后更大 | EXE 体积 100 MB+ | 排除未用 Qt 模块；onedir 优先；在 RELEASE 中如实记录 |
+| 真实 Ollama 联调依赖本机服务 | CI 不可复现 | 全部核心测试用 MockTransport；集成测试单独标记 |
+| 情绪规则过硬 | 判定不准 | V0.1 接受规则法；预留 `source` 字段，未来换模型打分不破坏接口 |
+
+---
+
+## 变更记录
+
+| 日期 | 变更 |
+| --- | --- |
+| 2026-10-22 | 初始计划；完成 Stage 0 |

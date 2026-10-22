@@ -1,0 +1,45 @@
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- PyInstaller 产物 ----
+build/
+dist/
+*.manifest
+
+# ---- 本地运行时数据（不入库） ----
+*.db
+*.db-wal
+*.db-shm
+config.local.json
+logs/
+*.log
+
+# ---- 编辑器 / 系统（OneDrive 会生成 desktop.ini） ----
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 本地临时文件与工具缓存 ----
+tmp/
+scratch/
+.tmp/
+.pip-cache/
+.uv-cache/
