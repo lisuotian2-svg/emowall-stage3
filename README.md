@@ -41,19 +41,20 @@
 
 ```
 emowall-v0.1-ai聊天机器人/
-├─ emowall/                  # 应用包
+├─ emowall/                  # 应用包（6 个包目录，均含 __init__.py）
 │  ├─ ai/                    # AI 核心：Ollama 客户端、流式生成、取消、上下文窗口
 │  ├─ config/                # 配置系统：JSON 配置、默认值、校验、原子写入
-│  ├─ storage/               # SQLite 存储：会话 / 消息仓库
+│  ├─ storage/               # SQLite 存储：会话 / 消息仓库（无 Qt、无线程）
 │  ├─ emotion/               # 情绪系统：5 种基础表情的纯函数映射
-│  ├─ gui/                   # PySide6 界面（允许 import Qt 的两个位置之一）
+│  ├─ gui/                   # PySide6 界面 + 工作线程编排（Stage 5 含 db_service.py）
 │  ├─ app.py                 # 组合根：装配各层，启动应用（Stage 5）
 │  └─ __main__.py            # python -m emowall 入口（Stage 5）
-├─ tests/                    # pytest 用例（含架构守护测试）
-├─ scripts/                  # 运维 / 自检脚本
-├─ docs/                     # 架构、计划、环境审计
-├─ requirements.txt
-├─ pytest.ini
+├─ tests/                    # pytest 用例：架构守护 / 文档一致性 / 自检脚本
+├─ scripts/check_env.py      # 环境自检（仅标准库，可在装依赖前运行）
+├─ docs/                     # ARCHITECTURE、DEVELOPMENT_PLAN、ENVIRONMENT_AUDIT
+├─ requirements.txt          # 依赖声明（唯一来源）
+├─ pytest.ini                # 测试配置（默认排除 integration）
+├─ .gitignore / .gitattributes
 ├─ AGENTS.md                 # 长期开发规则（给人和 AI 协作者）
 └─ README.md
 ```
@@ -68,13 +69,21 @@ emowall-v0.1-ai聊天机器人/
 | 项 | 本机实测 |
 | --- | --- |
 | 操作系统 | Windows 11（10.0.26200，20 核 / RTX 5060 Laptop 8 GB） |
-| Python | 3.12.15（`C:\Users\zgy15\AppData\Local\uv\python\cpython-3.12-windows-x86_64-none\python.exe`） |
-| Git | 2.56.0（已配置 `user.name` / `user.email`） |
+| 环境与依赖 | Python 3.12（uv 托管）+ uv 0.13+；依赖声明见 `requirements.txt` |
+| Python | 3.12.15（`%LOCALAPPDATA%\uv\python\cpython-3.12-windows-x86_64-none\python.exe`） |
+| Git | 2.56.0（提交前需配置 `user.name` / `user.email`） |
 | Ollama | 0.40.6，API `http://127.0.0.1:11434` |
 | 模型 | `qwen3:8b`（Q4_K_M，8.2B，约 4.9 GB） |
 | 模型目录 | `D:\ollama\models`（由用户环境变量 `OLLAMA_MODELS` 指定） |
 
 > ⚠️ 本机 `py` 启动器默认解析到 Python **3.15**，请始终使用虚拟环境里的解释器（`.venv\Scripts\python.exe`）；不要用裸 `python` 或 `py` 等模糊命令。
+
+### 环境与依赖管理
+
+- 环境：Python 3.12（uv 托管）+ uv 0.13+，虚拟环境固定为项目根目录的 `.venv`（不入库）。
+- 依赖：**唯一来源是 `requirements.txt`**，故意不引入 `pyproject.toml` 依赖表，避免两套来源冲突。
+- 安装：`uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt`。
+- 备用：普通桌面终端也可用 `python -m venv .venv` + `pip install -r requirements.txt`；受限环境里 `ensurepip` 可能失败（见环境审计「问题 7」）。
 
 ---
 
@@ -84,10 +93,13 @@ emowall-v0.1-ai聊天机器人/
 # 1) 进入项目目录
 cd <项目目录>   # 例：C:\Users\<你>\OneDrive\文档\emowall-v0.1-ai聊天机器人
 
-# 2) 创建虚拟环境（Python 3.12）
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# 2) 创建虚拟环境并安装依赖（推荐 uv；已存在的 .venv 会复用，不会重建）
+uv venv --python 3.12 .venv
+uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt
+
+# 备用（pip 可用的普通桌面终端）：
+# python -m venv .venv
+# .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
 # 3) 启动 Ollama（若未运行）
 ollama serve          # 或从开始菜单启动 Ollama
@@ -118,7 +130,7 @@ ollama serve          # 或从开始菜单启动 Ollama
 输出逐项 `PASS / WARN / FAIL`；退出码 0 = 无 FAIL，1 = 有 FAIL（`--strict` 时 WARN 也算失败）。
 
 ```powershell
-python scripts\check_env.py --help
+.\.venv\Scripts\python.exe scripts\check_env.py --help
 ```
 
 ---

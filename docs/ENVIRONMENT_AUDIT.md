@@ -1,8 +1,11 @@
 # 环境审计报告 — EmoWall AI V0.1
 
 - 审计时间：2026-10-22 22:37 ~ 22:50（Asia/Shanghai）
-- 审计对象：`C:\Users\zgy15\OneDrive\文档\emowall-v0.1-ai聊天机器人`
-- 审计方式：只读检查 + 一次真实 Ollama API 探测；**未安装依赖、未修改用户环境变量、未升级 Ollama、未改动系统配置**。
+- 审计对象：`<项目目录>`（本机为 OneDrive 同步目录，实际路径用 `Get-Location` 查看）
+- 审计方式：只读检查 + 一次真实 Ollama API 探测；**未修改用户环境变量、未升级 Ollama、未改动系统配置**。
+  项目内创建了 `.venv` 并装入 pip / pytest（原因见「问题 7」）。
+
+> 本报告记录的是本机 2026-10-22 的实测值；仓库文档统一使用占位符，具体路径以 `scripts/check_env.py` 输出为准。
 
 ---
 
@@ -11,11 +14,12 @@
 | 维度 | 结论 | 说明 |
 | --- | --- | --- |
 | 工作目录 | ✅ 可用 | 审计开始时为空目录，无既有文件可覆盖 |
-| Python 3.12 | ✅ 满足 | 3.12.15（uv 托管），pip 26.2.1 可用 |
+| Python 3.12 | ✅ 满足 | 3.12.15（uv 托管），uv 0.13.3；项目 `.venv` 内 pip 26.2.2 |
 | Git | ✅ 满足 | 2.56.0，已配置用户名/邮箱；目录原本不是仓库，已 `git init` |
 | Ollama | ⚠️ 已安装未运行 | 0.40.6，二进制与 API 均正常，服务需启动 |
 | 本地模型 | ✅ 有可用模型 | `qwen3:8b`（Q4_K_M，8.2B，约 4.9 GB），存于 `D:\ollama\models` |
 | Python 依赖 | ⚠️ 部分安装 | 项目 `.venv` 内已有 pip 26.2.2 + pytest 9.1.1；`PySide6 / httpx / pyinstaller` 未装（Stage 1 安装） |
+| 环境与依赖管理 | ✅ 已统一 | Python 3.12（uv 托管）+ uv 0.13.3；`.venv` 复用未重建；依赖唯一来源 `requirements.txt`；`uv pip install --dry-run -r requirements.txt` 可解析全部依赖 |
 | 网络（PyPI） | ✅ 可达但不稳定 | 查询版本成功，出现数次 `SSL: UNEXPECTED_EOF` 重试 |
 | 硬件 | ✅ 充裕 | RTX 5060 Laptop 8 GB（模型全部驻留显存）、20 核、C: 167 GB 可用 |
 
@@ -31,11 +35,11 @@
 | CPU | 20 逻辑核 | `NUMBER_OF_PROCESSORS=20` |
 | GPU | NVIDIA GeForce RTX 5060 Laptop GPU，8151 MiB，驱动 592.15 | `nvidia-smi` |
 | 磁盘 | C: 167.3 GB 可用 / 400 GB；D: 395.1 GB 可用 / 551.6 GB | `System.IO.DriveInfo` |
-| Python | 3.12.15 | `C:\Users\zgy15\AppData\Local\uv\python\cpython-3.12-windows-x86_64-none\python.exe` |
+| Python | 3.12.15 | `%LOCALAPPDATA%\uv\python\cpython-3.12-windows-x86_64-none\python.exe` |
 | `py` 启动器 | 默认 **3.15**，另有 Store 3.13 | `py -0` ⚠️ 与项目要求的 3.12 不一致 |
-| pip / uv | pip 26.2.1 / uv 0.13.3 | `pip --version`、`uv --version` |
-| Git | 2.56.0.windows.1，`user.name=lisuotian2-svg`，`user.email=lisuotian2@gmail.com` | `git --version`、`git config --global` |
-| Git 仓库 | 审计时**非**仓库 | `git status` → `fatal: not a git repository` |
+| pip / uv | 项目 `.venv`：pip 26.2.2；uv 0.13.3 | `.venv\Scripts\python.exe -m pip --version`、`uv --version` |
+| Git | 2.56.0.windows.1，已配置提交身份 | `git --version`、`git config --global` |
+| Git 仓库 | 审计时**非**仓库；随后初始化 | `git status` → `fatal: not a git repository`（审计时） |
 | Ollama | 0.40.6（提示可升级到 0.40.8，安装包已下载未安装） | `ollama --version` |
 | Ollama 服务 | **未运行**（11434 不可达） | `Test-NetConnection` → False |
 | 本地模型 | `qwen3:8b`，4.87 GiB，Q4_K_M，支持 `completion/tools/thinking` | `GET /api/tags` |
@@ -44,6 +48,15 @@
 | Python 依赖 | 全局解释器无 PySide6/httpx/pytest；项目 `.venv` 内有 pip + pytest | `pip list`；`.venv\Scripts\python.exe -m pip list` |
 | 项目虚拟环境 | ✅ 已建（`.venv`，Python 3.12.15） | `--without-pip` 创建后经 `uv` 安装 pip 26.2.2 / pytest 9.1.1（见问题 7） |
 | PyPI 版本 | PySide6 6.12.0 / httpx 0.28.1 / pytest 9.1.1 / PyInstaller 6.22.3 | `pip index versions` |
+
+**环境管理约定（Stage 0 修复后统一）**
+
+- 解释器：Python 3.12（uv 托管 CPython）+ uv 0.13+；虚拟环境固定为项目根目录 `.venv`。
+- 依赖声明：**唯一来源 `requirements.txt`**；故意不引入 `pyproject.toml` 依赖表，避免两套来源漂移。
+- 安装方式：`uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt`；
+  受限环境需把 `TMP/TEMP/UV_CACHE_DIR` 指向工作区（见「问题 7」）。
+- 备用路径：普通桌面终端可用 `pip install -r requirements.txt`；受限环境 `ensurepip` 可能失败，不作为首选。
+- 现有 `.venv` 不重建：`python -m venv --without-pip` 创建后由 uv 装入 pip/pytest（见「问题 7」）。
 
 ---
 
@@ -185,6 +198,7 @@ uv pip install --python ".\.venv\Scripts\python.exe" pip pytest --link-mode copy
 - 上述目录已加入 `.gitignore`（`.tmp/`、`.uv-cache/`、`.pip-cache/`）。
 - 若 `python -m venv .venv` 在本机普通终端可用，则**不需要**本节，直接在终端里用 pip 即可。
 - 受限环境下跑测试可加 `-p no:cacheprovider` 消除缓存告警。
+- **现有 `.venv` 的实际来源**：`python -m venv .venv --without-pip`（沙箱下唯一可行方式）→ 由 uv 装入 pip 26.2.2 与 pytest 9.1.1；**未重建、未覆盖**。新机器标准流程为 `uv venv --python 3.12 .venv`。
 
 ---
 

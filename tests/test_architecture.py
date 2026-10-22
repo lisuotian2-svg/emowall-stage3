@@ -5,25 +5,29 @@
     2. 只有 `emowall/gui/**` 与组合根 `emowall/app.py` 允许 import Qt 绑定库；
     3. 四层只允许标准库 + 白名单第三方库（ai 仅 httpx，其余为空）；
     4. `emowall/__init__.py` 不得拉起 GUI。
+
+检查对象是**项目源码里的直接 import 语句**；第三方库自身的传递依赖（如 httpx 依赖的
+h11/httpcore）不扫描、也不算违规。
 """
 
 from __future__ import annotations
 
 import ast
+import shutil
 import sys
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = PROJECT_ROOT / "emowall"
+TESTS_ROOT = PROJECT_ROOT / "tests"
 
 LEAF_LAYERS = ("ai", "config", "storage", "emotion")
 QT_MODULES = ("PySide6", "PySide2", "PyQt6", "PyQt5", "shiboken6", "shiboken2")
 FORBIDDEN_TARGETS = ("gui", "app")
-
-# 唯一允许 import Qt 的位置：界面层目录 与 组合根模块
-QT_ALLOWED_DIRS = (PACKAGE_ROOT / "gui",)
-QT_ALLOWED_FILES = (PACKAGE_ROOT / "app.py",)
 
 # 各层允许的第三方依赖（标准库始终允许）
 THIRD_PARTY_ALLOWLIST: dict[str, frozenset[str]] = {
@@ -33,26 +37,19 @@ THIRD_PARTY_ALLOWLIST: dict[str, frozenset[str]] = {
     "emotion": frozenset(),
 }
 
-
-def _layer_files(layer: str) -> list[Path]:
-    layer_dir = PACKAGE_ROOT / layer
-    assert layer_dir.is_dir(), f"缺少层目录：{layer_dir}"
-    return sorted(layer_dir.rglob("*.py"))
+# 单元测试不允许直接引入网络客户端（真实联调放 integration 用例）
+NETWORK_CLIENTS = frozenset({"httpx", "requests", "aiohttp", "urllib3", "websockets"})
 
 
-def _imported_modules(path: Path) -> set[str]:
-    """返回文件中所有被 import 的绝对模块名（相对 import 会展开成完整路径）。"""
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-
-    relative_to_project = path.relative_to(PROJECT_ROOT).with_suffix("")
-    package_parts = list(relative_to_project.parts[:-1])
+def scan_imports(path: Path, project_root: Path) -> set[str]:
+    """返回文件里所有被 import 的绝对模块名（相对 import 会展开成完整路径）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    package_parts = list(path.relative_to(project_root).with_suffix("").parts[:-1])
 
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                modules.add(alias.name)
+            modules.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 # level=1 表示当前包，level=2 表示上一级
@@ -62,28 +59,86 @@ def _imported_modules(path: Path) -> set[str]:
                 prefix = node.module or ""
             if prefix:
                 modules.add(prefix)
-                for alias in node.names:
-                    modules.add(f"{prefix}.{alias.name}")
+                modules.update(f"{prefix}.{alias.name}" for alias in node.names)
             else:
-                for alias in node.names:
-                    modules.add(alias.name)
+                modules.update(alias.name for alias in node.names)
     return modules
 
 
-def _top_level(module: str) -> str:
+def top_level(module: str) -> str:
     return module.split(".", 1)[0]
 
 
-def _iter_layer_modules(layer: str) -> Iterator[tuple[Path, str]]:
-    for path in _layer_files(layer):
-        for module in sorted(_imported_modules(path)):
+def python_files(package_root: Path) -> list[Path]:
+    return sorted(package_root.rglob("*.py"))
+
+
+def is_qt_allowed(path: Path, package_root: Path) -> bool:
+    """只有 gui 目录与组合根 app.py 允许出现 Qt。"""
+    return (package_root / "gui") in path.parents or path == package_root / "app.py"
+
+
+def layer_modules(project_root: Path, layer: str) -> Iterator[tuple[Path, str]]:
+    package_root = project_root / "emowall"
+    for path in sorted((package_root / layer).rglob("*.py")):
+        for module in sorted(scan_imports(path, project_root)):
             yield path, module
 
 
-def _qt_allowed(path: Path) -> bool:
-    if any(allowed_dir in path.parents for allowed_dir in QT_ALLOWED_DIRS):
-        return True
-    return path in QT_ALLOWED_FILES
+def find_qt_violations(project_root: Path = PROJECT_ROOT) -> list[str]:
+    package_root = project_root / "emowall"
+    violations: list[str] = []
+    for path in python_files(package_root):
+        if is_qt_allowed(path, package_root):
+            continue
+        for module in sorted(scan_imports(path, project_root)):
+            if top_level(module) in QT_MODULES:
+                relative = path.relative_to(project_root).as_posix()
+                violations.append(f"{relative} → {module}")
+    return violations
+
+
+def find_layer_dependency_violations(project_root: Path = PROJECT_ROOT) -> list[str]:
+    violations: list[str] = []
+    for layer in LEAF_LAYERS:
+        others = [name for name in LEAF_LAYERS if name != layer]
+        forbidden = [f"emowall.{name}" for name in others + list(FORBIDDEN_TARGETS)]
+        for path, module in layer_modules(project_root, layer):
+            if any(module == target or module.startswith(f"{target}.") for target in forbidden):
+                relative = path.relative_to(project_root).as_posix()
+                violations.append(f"{relative} → {module}")
+    return violations
+
+
+def find_third_party_violations(project_root: Path = PROJECT_ROOT) -> list[str]:
+    standard_library = set(sys.stdlib_module_names)
+    violations: list[str] = []
+    for layer, allowed in THIRD_PARTY_ALLOWLIST.items():
+        for path, module in layer_modules(project_root, layer):
+            top = top_level(module)
+            if top == "emowall" or top in standard_library or top in allowed:
+                continue
+            if top in QT_MODULES:
+                continue  # 由 find_qt_violations 单独报告
+            relative = path.relative_to(project_root).as_posix()
+            violations.append(f"{relative} → {module}（层：{layer}）")
+    return violations
+
+
+@pytest.fixture()
+def workdir() -> Iterator[Path]:
+    """在工作区内创建临时目录（受限环境的系统临时目录可能不可写）。"""
+    base = PROJECT_ROOT / ".tmp" / "arch-tests" / uuid.uuid4().hex
+    base.mkdir(parents=True, exist_ok=True)
+    try:
+        yield base
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 真实仓库的守护
+# ---------------------------------------------------------------------------
 
 
 def test_all_layers_exist() -> None:
@@ -94,60 +149,129 @@ def test_all_layers_exist() -> None:
 
 
 def test_root_package_does_not_import_qt_or_gui() -> None:
-    """导入 emowall 不能顺带加载 Qt 或界面代码。"""
     init_file = PACKAGE_ROOT / "__init__.py"
-    for module in _imported_modules(init_file):
-        assert _top_level(module) not in QT_MODULES, f"emowall/__init__.py 不允许 import {module}"
+    for module in scan_imports(init_file, PROJECT_ROOT):
+        assert top_level(module) not in QT_MODULES, f"emowall/__init__.py 不允许 import {module}"
         assert not module.startswith(("emowall.gui", "emowall.app")), (
             f"emowall/__init__.py 不允许 import {module}"
         )
 
 
 def test_only_gui_and_composition_root_import_qt() -> None:
-    """Qt 只允许出现在界面层与组合根，其他位置出现即视为分层被破坏。"""
-    offenders = [
-        f"{path.relative_to(PROJECT_ROOT)} → {module}"
-        for path in sorted(PACKAGE_ROOT.rglob("*.py"))
-        if not _qt_allowed(path)
-        for module in _imported_modules(path)
-        if _top_level(module) in QT_MODULES
-    ]
-    assert not offenders, "Qt 只能出现在 emowall/gui 与 emowall/app.py：" + "; ".join(offenders)
+    assert find_qt_violations() == []
 
 
 def test_leaf_layers_do_not_import_qt() -> None:
-    offenders = [
-        f"{path.relative_to(PROJECT_ROOT)} → {module}"
-        for layer in LEAF_LAYERS
-        for path, module in _iter_layer_modules(layer)
-        if _top_level(module) in QT_MODULES
-    ]
-    assert not offenders, "核心层禁止依赖 Qt：" + "; ".join(offenders)
+    leaf_prefixes = tuple(f"emowall/{layer}/" for layer in LEAF_LAYERS)
+    offenders = [item for item in find_qt_violations() if item.startswith(leaf_prefixes)]
+    assert offenders == []
 
 
 def test_leaf_layers_are_mutually_independent() -> None:
-    offenders = []
-    for layer in LEAF_LAYERS:
-        others = [name for name in LEAF_LAYERS if name != layer]
-        forbidden = [f"emowall.{name}" for name in others + list(FORBIDDEN_TARGETS)]
-        for path, module in _iter_layer_modules(layer):
-            if any(module == target or module.startswith(f"{target}.") for target in forbidden):
-                offenders.append(f"{path.relative_to(PROJECT_ROOT)} → {module}")
-    assert not offenders, (
-        "四层必须互不依赖，跨层数据由组合根（emowall/app.py）映射：" + "; ".join(offenders)
-    )
+    assert find_layer_dependency_violations() == []
 
 
 def test_leaf_layers_use_stdlib_and_allowlisted_third_party_only() -> None:
-    """四层只允许标准库 + 白名单第三方库，保证可迁移、可离线测试。"""
-    standard_library = set(sys.stdlib_module_names)
-    offenders = []
-    for layer, allowed in THIRD_PARTY_ALLOWLIST.items():
-        for path, module in _iter_layer_modules(layer):
-            top = _top_level(module)
-            if top == "emowall" or top in standard_library or top in allowed:
-                continue
-            if top in QT_MODULES:
-                continue  # 由 test_leaf_layers_do_not_import_qt 单独报告
-            offenders.append(f"{path.relative_to(PROJECT_ROOT)} → {module}（层：{layer}）")
-    assert not offenders, "出现白名单外的依赖：" + "; ".join(offenders)
+    assert find_third_party_violations() == []
+
+
+def test_unit_tests_do_not_import_network_clients() -> None:
+    offenders = [
+        f"{path.relative_to(PROJECT_ROOT).as_posix()} → {module}"
+        for path in sorted(TESTS_ROOT.rglob("*.py"))
+        for module in sorted(scan_imports(path, PROJECT_ROOT))
+        if top_level(module) in NETWORK_CLIENTS or module.startswith("urllib.request")
+    ]
+    assert offenders == [], "单元测试不得直接访问网络：" + "; ".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# 负向用例：证明规则被违反时测试真的会失败
+# ---------------------------------------------------------------------------
+
+
+def _write_tree(root: Path, files: dict[str, str]) -> None:
+    for relative, content in files.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+_BASE_TREE = {
+    "emowall/__init__.py": '__version__ = "0.0.0"\n',
+    "emowall/ai/__init__.py": "",
+    "emowall/config/__init__.py": "",
+    "emowall/storage/__init__.py": "",
+    "emowall/emotion/__init__.py": "",
+    "emowall/gui/__init__.py": "",
+}
+
+
+def _fake_project(workdir: Path, extra: dict[str, str]) -> Path:
+    files = dict(_BASE_TREE)
+    files.update(extra)
+    _write_tree(workdir, files)
+    return workdir
+
+
+def test_guard_flags_qt_in_core_layer(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/ai/bad.py": "import PySide6\n"})
+    violations = find_qt_violations(root)
+    assert len(violations) == 1
+    assert "emowall/ai/bad.py" in violations[0]
+
+
+def test_guard_flags_qt_imported_with_from(workdir: Path) -> None:
+    root = _fake_project(
+        workdir, {"emowall/emotion/bad.py": "from PySide6.QtCore import QObject\n"}
+    )
+    assert find_qt_violations(root), "from PySide6.X import Y 必须被识别"
+
+
+def test_guard_flags_qt_outside_gui_and_app(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/utils/helper.py": "import PySide6\n"})
+    assert find_qt_violations(root), "非 gui/app 位置出现 Qt 必须被识别"
+
+
+def test_guard_allows_qt_in_gui_and_app(workdir: Path) -> None:
+    root = _fake_project(
+        workdir,
+        {
+            "emowall/gui/widget.py": "from PySide6.QtWidgets import QWidget\n",
+            "emowall/app.py": "import PySide6\n",
+        },
+    )
+    assert find_qt_violations(root) == []
+
+
+def test_guard_flags_layer_importing_other_layer(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/storage/bad.py": "from emowall.ai import models\n"})
+    violations = find_layer_dependency_violations(root)
+    assert violations and "emowall/storage/bad.py" in violations[0]
+
+
+def test_guard_flags_relative_layer_import(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/storage/bad.py": "from .. import ai\n"})
+    assert find_layer_dependency_violations(root), "相对 import 也必须被识别"
+
+
+def test_guard_flags_layer_importing_gui_or_app(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/config/bad.py": "import emowall.gui\n"})
+    assert find_layer_dependency_violations(root)
+
+
+def test_guard_flags_unlisted_third_party_dependency(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/ai/bad.py": "import requests\n"})
+    violations = find_third_party_violations(root)
+    assert violations and "requests" in violations[0]
+
+
+def test_guard_flags_httpx_outside_ai_layer(workdir: Path) -> None:
+    root = _fake_project(workdir, {"emowall/config/bad.py": "import httpx\n"})
+    assert find_third_party_violations(root)
+
+
+def test_guard_allows_httpx_in_ai_layer(workdir: Path) -> None:
+    """ai 允许直接 import httpx；httpx 内部的 h11/httpcore 不属于项目直接依赖，不扫描。"""
+    root = _fake_project(workdir, {"emowall/ai/client.py": "import httpx\n"})
+    assert find_third_party_violations(root) == []

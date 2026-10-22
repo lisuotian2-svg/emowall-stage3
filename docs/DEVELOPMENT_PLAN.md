@@ -3,8 +3,11 @@
 > 原则：**每阶段必须有可复现的验收标准**，验收通过并提交 Git 后才进入下一阶段。
 > 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0 已完成，等待确认进入 Stage 1）。
 
-**命令约定**：以下命令均在项目根目录执行，`$PY` 表示项目虚拟环境解释器
-`.\.venv\Scripts\python.exe`（本机裸 `python` 与 `py` 可能指向别的解释器，不要使用）。
+**命令约定**：以下命令均在项目根目录执行；`$PY` 表示项目虚拟环境解释器 `.\.venv\Scripts\python.exe`，
+`$UV` 表示 `uv` 命令。本机裸 `python` 与 `py` 可能指向别的解释器，不要使用。
+
+**环境标准**：Python 3.12（uv 托管 CPython）+ uv 0.13+ 创建/同步 `.venv`；依赖声明的唯一来源是 `requirements.txt`
+（不引入 pyproject 依赖表，避免两套依赖来源冲突）。
 
 ---
 
@@ -36,7 +39,8 @@
 - `docs/ARCHITECTURE.md`、`docs/DEVELOPMENT_PLAN.md`、`docs/ENVIRONMENT_AUDIT.md`
 - `scripts/check_env.py`（仅标准库的环境自检）
 - `emowall/` 包骨架（各层 `__init__.py` 只有职责说明，无业务代码）
-- `tests/test_architecture.py`（架构守护）、`tests/test_package.py`
+- `tests/test_architecture.py`（架构守护：Qt 边界 / 层间隔离 / 依赖白名单 / 负向用例）
+- `tests/test_package.py`（包冒烟）、`tests/test_docs.py`（文档与结构一致）、`tests/test_check_env.py`（自检脚本）、`tests/test_pytest_config.py`（测试隔离）
 - Git 仓库初始化 + 首次提交
 
 **验收标准**
@@ -46,6 +50,7 @@
 3. `$PY -m pytest` 全绿（架构守护测试通过）。
 4. `git log --oneline` 至少有 1 条提交，`git status` 干净。
 5. 仓库中不存在 `*.db`、`.venv`、`build/`、`dist/`、密钥文件。
+6. 架构守护测试含**负向用例**：临时注入 `import PySide6` 或跨层 import 时，守护函数必须报告违规（证明规则真的会拦人）。
 
 ---
 
@@ -129,8 +134,9 @@
 
 **技术要点**
 
-- `sqlite3.connect(..., check_same_thread=False)` + 模块级锁：**写操作只在 GUI 工作线程执行**，主线程仅做单条短读（会话列表、消息加载）；每个操作短事务，`busy_timeout=2000`。
-- WAL + `foreign_keys=ON` + `busy_timeout=5000`。
+- `storage` 同步、线程无关：不建线程、不加锁、不依赖 Qt；每次操作短事务，`busy_timeout=2000`。
+- 保留 sqlite3 默认 `check_same_thread=True`：连接只在其所属线程使用（Stage 5 由独立 DB 工作线程独占）。
+- WAL + `foreign_keys=ON`。
 - 时间 UTC ISO-8601；会话 `updated_at` 在追加消息时更新。
 - 删除会话级联删除消息；`list_messages` 按 `id` 正序。
 
@@ -142,7 +148,7 @@
 4. 删除会话后其消息数为 0（级联生效），其他会话不受影响。
 5. `emotion/emotion_intensity` 可为 NULL，写入后原样读回。
 6. 同一会话第 1 条用户消息自动生成标题（≤ 20 字），空内容回退为「新会话」。
-7. 并发场景最小验证：两个连接交替读写不报 `database is locked`（WAL + busy_timeout=2000 生效）。
+7. 并发场景最小验证：两个独立线程各持一个连接交替读写，不报 `database is locked`（WAL + busy_timeout=2000 生效）；同一连接跨线程使用应抛 `ProgrammingError`（证明 `check_same_thread=True` 未被关闭）。
 8. `$PY -m pytest` 全绿；`grep -rn "PySide6\|httpx" emowall/storage` 无结果。
 
 ---
@@ -188,6 +194,7 @@
 - `emowall/gui/settings_dialog.py`：地址、模型（下拉取自 `/api/tags`）、温度、上下文预算
 - `emowall/gui/emotion_widget.py`：5 表情指示器（emoji + 名称 + 主色）
 - `emowall/gui/worker.py`：`ChatWorker(QObject)` + `QThread` 编排与取消
+- `emowall/gui/db_service.py`：`StorageService(QThread)` 独占数据库连接，按队列执行读写并回传结果
 - `emowall/app.py`：组合根（`python -m emowall` 入口）
 - `emowall/__main__.py`
 - `tests/test_gui_imports.py`（无显示器环境下只做导入/结构守护，不跑事件循环）
@@ -195,10 +202,11 @@
 **技术要点**
 
 - 主线程只做 UI；`ChatWorker` 通过 `moveToThread` 运行，信号：`chunk(str) / finished(stats, emotion) / failed(str) / cancelled()`。
+- 数据库工作线程（独立 `QThread`）：`StorageService` 在 `run()` 内打开连接、`finally` 关闭；所有读写经信号投递，主线程不调用 repository。
 - 「生成中」状态：发送键变「停止」，输入框保留可编辑但不可重复发送。
 - 冷启动提示：首块到达前显示「模型加载中…」（因为 qwen3:8b 冷启动约 40 s）。
 - 失败分类提示：连接失败 → 「Ollama 未启动？点击查看启动方法」；模型缺失 → 「模型未安装」+ 建议命令。
-- 关闭窗口：若有生成中任务，先取消 + `wait(3s)`，再关库退出。
+- 关闭窗口：先取消生成并等待 AI 线程结束 → 投递 `close()` 并等待 DB 线程退出 → 关闭窗口。
 
 **验收标准**
 
@@ -211,6 +219,7 @@
 7. 每条 AI 回复后有 5 种表情之一显示，且与 `emotion` 层的单测结论一致。
 8. `$PY -m pytest` 全绿；`grep -rn "PySide6" emowall/ai emowall/storage emowall/config emowall/emotion` 无结果。
 9. 人工检查：无空白窗格、无占位文字、长消息自动换行横向不滚动、滚动条跟随到底部。
+10. 主线程零数据库访问：日志显示所有 SQL 都在 DB 工作线程执行，主线程从未调用 repository（可用仓储包装计数验证）。
 
 ---
 
@@ -263,3 +272,4 @@
 | 日期 | 变更 |
 | --- | --- |
 | 2026-10-22 | 初始计划；完成 Stage 0 |
+| 2026-10-22 | Stage 0 工程修复：统一 Qt 允许范围、数据库改为独立工作线程、统一 Python 3.12 + uv 环境、加强架构/文档/脚本测试 |

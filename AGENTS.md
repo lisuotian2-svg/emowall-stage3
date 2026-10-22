@@ -32,7 +32,9 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 ### 2.2 GUI 线程规则
 
 - 网络、模型加载与生成等阻塞等待**不得在 GUI 主线程执行**；一律通过工作线程（`QThread` + worker 对象）执行，用信号回传结果。
-- SQLite 例外：写操作在 GUI 工作线程内执行；主线程只允许「单条短读」（会话列表、消息加载），依赖 WAL + 短事务 + `busy_timeout ≤ 2 s`，超时提示重试而不是卡死界面。
+- 数据库使用**独立数据库工作线程**：SQLite 连接由该线程创建、使用、关闭，保留 `check_same_thread=True`；主线程与 AI 工作线程都不直接触碰连接。
+- GUI 不等待数据库：读写都投递到 DB 线程队列，结果用信号回传；DB 错误以信号提示，不阻塞生成。
+- `emowall/storage` 只提供同步、线程无关的库接口，不创建线程、不依赖 Qt。
 - 工作线程只调用 AI 核心的**同步 API**，不引入 `asyncio` 事件循环叠加 Qt 事件循环。
 - UI 更新（追加文本、滚动、按钮状态）只在主线程做。
 
@@ -50,7 +52,7 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 | --- | --- | --- |
 | `emowall/ai` | Ollama HTTP 调用、NDJSON 流解析、上下文窗口裁剪、取消、错误分类 | 不碰 Qt、不碰 SQLite、不读配置文件 |
 | `emowall/config` | `%APPDATA%\EmoWall\config.json` 读写、默认值、校验、原子写入 | 不发网络请求、不 import `emowall.ai`（含其数据类） |
-| `emowall/storage` | SQLite 打开/建表/迁移、会话与消息 CRUD | 不生成 AI 内容、不依赖 Qt |
+| `emowall/storage` | SQLite 打开/建表/迁移、会话与消息 CRUD | 不生成 AI 内容、不依赖 Qt、不创建线程（线程封装在 GUI 层） |
 | `emowall/emotion` | 文本 → 5 种基础表情的纯函数映射（确定性、可测试） | 不发网络请求、不依赖 Qt / DB |
 | `emowall/gui` | 窗口、控件、信号槽、线程编排、把各层拼起来用 | 不直接拼 HTTP、不写 SQL 字符串 |
 | `emowall/app.py` | 组合根：加载配置、建 DB、建引擎、注入 GUI | 不含业务规则 |
@@ -105,13 +107,15 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 
 ## 8. 环境事实（本机，2026-10-22 审计）
 
+> 本节是当时本机的快照；路径统一用占位符，具体值以 `scripts/check_env.py` 的输出为准。
+
 | 项 | 值 |
 | --- | --- |
-| 工作目录 | `C:\Users\zgy15\OneDrive\文档\emowall-v0.1-ai聊天机器人`（OneDrive 同步目录） |
-| Python | 3.12.15，`C:\Users\zgy15\AppData\Local\uv\python\cpython-3.12-windows-x86_64-none\python.exe` |
+| 工作目录 | `<项目目录>`（本机位于 OneDrive 同步目录，用 `Get-Location` 查看） |
+| Python | 3.12.15，uv 托管（`uv python find 3.12` 可定位；实际路径因机器而异） |
 | `py` 启动器 | 默认 3.15（另有 Store 3.13）——**不要依赖裸 `py`** |
-| Git | 2.56.0，`user.name=lisuotian2-svg`，`user.email=lisuotian2@gmail.com` |
-| Ollama | 0.40.6，`C:\Users\zgy15\AppData\Local\Programs\Ollama\ollama.exe` |
+| Git | 2.56.0，提交前需配置 `user.name` / `user.email` |
+| Ollama | 0.40.6（默认安装于 `%LOCALAPPDATA%\Programs\Ollama\`） |
 | Ollama API | `http://127.0.0.1:11434`（未运行时会连接失败，需先启动） |
 | 模型 | `qwen3:8b`（Q4_K_M，8.2B，约 4.9 GB，支持 thinking/tools） |
 | 模型目录 | `D:\ollama\models`（用户环境变量 `OLLAMA_MODELS`） |

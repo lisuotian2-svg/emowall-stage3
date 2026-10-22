@@ -232,13 +232,14 @@ def check_app_data(report: Report) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 先统一下输出编码，保证 --help 与异常路径的中文在管道/CI 中也不会乱码
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="EmoWall AI V0.1 环境自检")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Ollama 服务地址")
     parser.add_argument("--strict", action="store_true", help="WARN 也返回非零退出码")
     args = parser.parse_args(argv)
-
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     report = Report()
     check_python(report)

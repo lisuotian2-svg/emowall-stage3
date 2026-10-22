@@ -43,6 +43,7 @@
 1. `ai / config / storage / emotion` 不得 import 彼此，也不得 import `gui`、`app`。
 2. 只有 `emowall/gui/**` 与组合根 `emowall/app.py` 可以 import `PySide6`；`emowall/__init__.py` 不得 import Qt 或 gui/app。
 3. 四层第三方依赖白名单：`ai` 仅 `httpx`，`config / storage / emotion` 仅标准库。
+4. `storage` 不创建线程、不依赖 Qt；SQLite 连接由应用层工作线程独占（见 §5.1）。
 
 ---
 
@@ -208,6 +209,8 @@ def detect_emotion(text: str) -> EmotionResult: ...      # 纯函数、确定性
 def presentation(emotion: Emotion) -> EmotionPresentation: ...  # 名称/表情/主色
 ```
 
+> `EmotionPresentation` 是 **Stage 4 设计约定**（名称 / emoji / 主色三个字段），Stage 0 只统一文档，不实现。
+
 ---
 
 ## 4. 一次对话的数据流
@@ -215,22 +218,26 @@ def presentation(emotion: Emotion) -> EmotionPresentation: ...  # 名称/表情/
 ```
 用户在输入框回车
       │ GUI 主线程：校验输入、禁用发送、显示用户气泡、开启“生成中”
+      │ 投递「写用户消息」给数据库工作线程（异步，不等待返回）
       ▼
-GUI 工作线程（QThread）
-      │ 1) storage.append_message(user)                    ← 先落库，崩溃不丢
-      │ 2) engine.build_context(history + 新消息)           ← 裁剪
-      │ 3) engine.stream_reply(ctx, cancel=token)
+GUI 工作线程（QThread / ChatWorker）
+      │ 1) engine.build_context(界面已加载的历史 + 新消息)
+      │ 2) engine.stream_reply(ctx, cancel=token)
       ▼
 OllamaClient.stream_chat → POST /api/chat (stream=true)
       │ 每行 NDJSON → ChatChunk → signal chunk(text) ───────► 主线程追加到气泡
       ▼
-done=true → GenerationStats
-      │ 4) emotion.detect_emotion(全文)                     ← 纯函数
-      │ 5) storage.append_message(assistant, emotion...)     ← 落库
-      │ 6) signal finished(stats, emotion) ────────────────► 主线程：恢复输入、更新表情
+done=true → GenerationStats（或 cancelled / failed）
+      │ 3) emotion.detect_emotion(全文)                      ← 纯函数
+      │ 4) 投递「写 assistant 消息」给数据库工作线程（异步）
+      │ 5) signal finished(stats, emotion) ────────────────► 主线程：恢复输入、更新表情
+      ▼
+数据库工作线程（QThread / StorageService，独占一个 sqlite3 连接）
+      │ FIFO 执行：append_message(user) → append_message(assistant)
+      │ 结果信号：会话列表刷新 / storage_error(str)
 ```
 
-> 落库位置：图中 1) 与 5) 的 `storage` 写操作在 **GUI 工作线程**内完成；会话列表与历史消息的短读由主线程执行（见 §5.1）。
+> 所有 SQLite 读写都在**专用数据库工作线程**执行；GUI 主线程与 AI 工作线程都不直接触碰数据库（见 §5.1）。
 
 失败/取消路径同一收尾函数：已收到文本非空则落库（`content` 为部分内容），
 然后 `signal failed(msg)` 或 `signal cancelled()`，UI 恢复可交互。
@@ -247,12 +254,18 @@ done=true → GenerationStats
 - **不做的**：不在 Qt 线程里跑 `asyncio`；不做线程池并发多路生成（V0.1 单会话单生成）。
 - **资源**：每次生成结束必须 `response.close()`，线程结束 `quit()+wait()`；退出应用时先取消再关库。
 
-### 5.1 数据库线程归属
+### 5.1 数据库线程归属（长期设计）
 
-- 写操作（用户消息、AI 回复）在 GUI 工作线程内执行，与生成串行，避免写冲突与 UI 卡顿。
-- 读操作（会话列表、历史加载）允许在主线程执行：WAL 下读写并发安全，单条查询预期 < 10 ms。
-- 连接用 `check_same_thread=False` + 模块级锁保护，`busy_timeout = 2000`；超时提示「数据库忙，请重试」。
-- 若实测主线程单次读 > 50 ms，Stage 5 再把读也移到专用存储线程（V0.1 默认不做，避免过度设计）。
+**架构决定：数据库使用独立工作线程，连接由该线程独占。**
+
+- `emowall/storage` 是**同步、线程无关**的库：不创建线程、不依赖 Qt、不加锁；由调用方保证同一时刻只被一个线程使用。
+- 应用层用 `QThread` + `StorageService`（`emowall/gui/db_service.py`）独占一个 SQLite 连接：连接在线程 `run()` 内打开，在 `finally` 中关闭。
+- 保留 sqlite3 默认的 `check_same_thread=True`：任何跨线程误用会立刻抛 `ProgrammingError`，把问题暴露在开发期，而不是用锁掩盖。
+- 所有读写都经队列投递到 DB 线程，结果用信号回传；GUI 主线程**不持有连接、不调用 repository**，界面零阻塞。
+- 顺序保证：单线程 FIFO，同一会话「用户消息 → AI 消息」的写入天然串行，不需要业务锁。
+- 失败处理：DB 线程捕获 `sqlite3.Error` 并发 `storage_error(str)` 信号，界面提示「保存失败」，不中断当前生成；`busy_timeout = 2000`。
+- 关闭顺序：取消生成 → 等待 AI 线程结束 → 投递 `close()` 并等待 DB 线程退出 → 关闭窗口。
+- Stage 0 只定架构；Stage 3 实现无 Qt 的 `storage`，Stage 5 实现 DB 线程封装，均不提前实现。
 
 ---
 
