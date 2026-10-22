@@ -1,7 +1,7 @@
 # EmoWall AI V0.1 分阶段开发计划
 
 > 原则：**每阶段必须有可复现的验收标准**，验收通过并提交 Git 后才进入下一阶段。
-> 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0 已完成，等待确认进入 Stage 1）。
+> 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0、Stage 1 已完成，等待确认进入 Stage 2）。
 
 **命令约定**：以下命令均在项目根目录执行；`$PY` 表示项目虚拟环境解释器 `.\.venv\Scripts\python.exe`，
 `$UV` 表示 `uv` 命令。本机裸 `python` 与 `py` 可能指向别的解释器，不要使用。
@@ -16,7 +16,7 @@
 | 阶段 | 主题 | 交付物 | 预计工作量 | 状态 |
 | --- | --- | --- | --- | --- |
 | 0 | 环境审计与项目骨架 | 目录、规范、计划、Git | 0.5 天 | ✅ 完成 |
-| 1 | 配置系统 | `emowall/config` | 0.5 天 | ⬜ 待确认 |
+| 1 | 配置系统 | `emowall/config` | 0.5 天 | ✅ 完成 |
 | 2 | AI 核心 | `emowall/ai` | 1 天 | ⬜ |
 | 3 | SQLite 存储 | `emowall/storage` | 0.5 天 | ⬜ |
 | 4 | 情绪系统 | `emowall/emotion` | 0.5 天 | ⬜ |
@@ -54,7 +54,7 @@
 
 ---
 
-## Stage 1 — 配置系统
+## Stage 1 — 配置系统 ✅
 
 **目标**：让「Ollama 地址 / 模型 / 上下文预算」可配置、可持久化、可损坏恢复，为后续所有层提供唯一事实来源。
 
@@ -62,8 +62,10 @@
 
 - `emowall/config/paths.py`：`default_app_data_dir()`（`%APPDATA%\EmoWall`，`EMOWALL_HOME` 可覆盖）
 - `emowall/config/settings.py`：`OllamaSettings / ChatSettings / AppSettings`（frozen dataclass + 校验）
-- `emowall/config/store.py`：`ConfigStore.load()` / `save()`（原子写入、损坏备份回退）
-- `tests/test_config.py`（≥ 10 个用例）
+- `emowall/config/errors.py`：`ConfigError / ConfigValidationError / ConfigIOError`
+- `emowall/config/store.py`：`ConfigStore.load()` / `save()`（原子写入、损坏备份回退、未知字段保留、版本兼容）
+- `docs/adr/0001-configuration-store.md`：配置存储设计决策
+- `tests/test_config.py`（37 个用例：默认值、读写、校验、损坏恢复、版本兼容、原子写入、目录隔离）
 
 **技术要点**
 
@@ -81,6 +83,18 @@
 5. 写入过程先写临时文件再 `os.replace`：人为中断不会留下半截 JSON。
 6. `EMOWALL_HOME` 指向临时目录时，配置文件落在该目录（测试隔离）。
 7. `$PY -m pytest` 全绿；`grep -rn "PySide6" emowall/config` 无结果。
+
+**验收结果（2026-10-22，Stage 1 完成）**
+
+| 验收项 | 结果 | 证据 |
+| --- | --- | --- |
+| 1 首次生成 + round-trip | ✅ | `test_first_load_creates_file_with_defaults`、`test_round_trip_persists_settings` |
+| 2 删除文件回默认 | ✅ | `test_delete_file_returns_defaults` |
+| 3 坏 JSON 备份恢复 | ✅ | `test_corrupt_json_is_backed_up_and_recovers`、`test_json_array_is_treated_as_corrupt` |
+| 4 非法值拒绝写盘 | ✅ | 12 项 `test_invalid_settings_are_rejected`、`test_save_raises_io_error_when_disk_fails` |
+| 5 原子写入 | ✅ | `test_save_leaves_no_temp_files` |
+| 6 EMOWALL_HOME 隔离 | ✅ | `test_emowall_home_isolates_storage` |
+| 7 测试全绿 + 无 Qt | ✅ | `$PY -m pytest`：89 passed / 1 skipped；架构守护测试通过 |
 
 ---
 
@@ -273,3 +287,4 @@
 | --- | --- |
 | 2026-10-22 | 初始计划；完成 Stage 0 |
 | 2026-10-22 | Stage 0 工程修复：统一 Qt 允许范围、数据库改为独立工作线程、统一 Python 3.12 + uv 环境、加强架构/文档/脚本测试 |
+| 2026-10-22 | 完成 Stage 1 配置系统：数据结构与校验、原子读写、损坏恢复、未知字段保留、版本兼容；新增 ADR-0001 |

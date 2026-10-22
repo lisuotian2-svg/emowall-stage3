@@ -347,9 +347,13 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
 }
 ```
 
-- 加载优先级：显式构造参数 > 配置文件 > 内置默认值。
-- 损坏时：重命名坏文件为 `config.corrupt-<时间戳>.json`，回退默认值并在 UI 顶部提示。
-- 写入：同目录临时文件 + `os.replace` 原子替换；`EMOWALL_HOME` 环境变量可整体重定向（测试用）。
+- 加载优先级（V0.1）：配置文件 > 内置默认值；显式覆盖（命令行 / 环境变量）留到需要时再加，不提前实现。
+- 字段非法：该字段回退默认值并记录 warning，**不重写用户文件**；整体损坏才备份重置。
+- 整体损坏：重命名为 `config.corrupt-<UTC 时间戳>.json` 后写回默认值；备份失败则保持原文件不动。
+- 未知字段：运行时忽略，保存时原样保留（避免新版本写入的字段被旧版本丢弃）。
+- 版本：`version` 为整数；较新版本只读已知字段并 warning，较旧版本缺失字段用默认值；迁移钩子留待后续。
+- 写入：同目录临时文件 + `fsync` + `os.replace` 原子替换；`EMOWALL_HOME` 可整体重定向。
+- 实现：`emowall/config/{errors,paths,settings,store}.py`，仅标准库；设计决策见 [ADR-0001](adr/0001-configuration-store.md)。
 
 ---
 

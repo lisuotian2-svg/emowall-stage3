@@ -7,12 +7,12 @@
 
 ## 当前状态
 
-**Stage 0（环境审计 + 项目骨架 + 开发规范）已完成。** 业务代码尚未开始，按约定需经项目负责人确认后才进入 Stage 1。
+**Stage 0（环境审计 + 项目骨架 + 开发规范）与 Stage 1（配置系统）已完成。** 业务功能尚未开始（AI 核心从 Stage 2 起），按约定需经项目负责人确认后进入 Stage 2。
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Stage 0 | 环境审计、目录结构、规范文档、Git 初始化 | ✅ 完成 |
-| Stage 1 | 配置系统（Ollama 地址/模型、app 数据目录） | ⬜ 待确认 |
+| Stage 1 | 配置系统（Ollama 地址/模型、推理与上下文参数、用户数据目录） | ✅ 完成 |
 | Stage 2 | AI 核心（Ollama 传输、流式输出、多轮上下文、取消） | ⬜ |
 | Stage 3 | SQLite 存储（会话 / 消息） | ⬜ |
 | Stage 4 | 情绪系统（5 种基础表情） | ⬜ |
@@ -85,6 +85,14 @@ emowall-v0.1-ai聊天机器人/
 - 安装：`uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt`。
 - 备用：普通桌面终端也可用 `python -m venv .venv` + `pip install -r requirements.txt`；受限环境里 `ensurepip` 可能失败（见环境审计「问题 7」）。
 
+### 配置系统（Stage 1）
+
+- 配置文件：`%APPDATA%\EmoWall\config.json`；设置 `EMOWALL_HOME` 可整体重定向（测试 / 便携 / 多实例隔离）。
+- 字段：`version`、`ollama`（地址、模型、连接/读取超时、`num_ctx`、温度、thinking 开关）、`chat`（上下文条数、字符预算、系统提示）。
+- 容错：缺失时自动生成默认值；JSON 损坏先备份为 `config.corrupt-<UTC 时间戳>.json` 再恢复默认；单字段非法只回退该字段并记日志（**不重写用户文件**）；未知字段运行时忽略、保存时保留；写入采用临时文件 + `os.replace` 原子替换。
+- 代码：`emowall/config/{errors,paths,settings,store}.py`，仅标准库，不依赖 Qt / httpx。
+- 设计决策记录：[docs/adr/0001-configuration-store.md](docs/adr/0001-configuration-store.md)。
+
 ---
 
 ## 快速开始
@@ -152,6 +160,7 @@ ollama serve          # 或从开始菜单启动 Ollama
 - [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) — 分阶段开发计划与验收标准
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 分层架构、接口契约、线程与取消模型
 - [docs/ENVIRONMENT_AUDIT.md](docs/ENVIRONMENT_AUDIT.md) — 本机环境审计报告与修复建议
+- [docs/adr/0001-configuration-store.md](docs/adr/0001-configuration-store.md) — ADR-0001：配置存储设计决策
 - [AGENTS.md](AGENTS.md) — 长期开发规则（架构铁律、代码 / 测试 / Git 规范）
 
 ---
