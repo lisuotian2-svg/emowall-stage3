@@ -645,6 +645,161 @@ def test_reset_allows_next_generation_after_cancel(client_factory: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("owned", [True, False])
+def test_reset_after_cancel_waits_for_generator_exit(owned: bool) -> None:
+    streams: list[ChunkStream] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stream = ChunkStream([
+            _line({"message": {"content": "partial"}, "done": False}),
+            _line(_done()),
+        ])
+        streams.append(stream)
+        return httpx.Response(200, stream=stream, headers=NDJSON_HEADERS)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as external:
+        with OllamaClient("http://mock", **(
+            {"transport": transport} if owned else {"client": external}
+        )) as client:
+            token = CancelToken()
+            generator = client.stream_chat(
+                model="m", messages=[ChatMessage("user", "hi")], cancel=token
+            )
+            try:
+                assert next(generator).text == "partial"
+                token.cancel()
+                with pytest.raises(RuntimeError, match="活动生成"):
+                    token.reset()
+                assert token.is_cancelled
+                with pytest.raises(CancelledError):
+                    next(generator)
+                assert streams[0].closed
+                token.reset()
+                chunks = list(client.stream_chat(
+                    model="m", messages=[ChatMessage("user", "again")], cancel=token
+                ))
+                assert chunks[-1].done
+                assert not token.is_cancelled
+                assert streams[1].closed
+            finally:
+                generator.close()
+
+
+def test_reset_is_blocked_until_exception_is_classified(
+    client_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream = BlockingStream()
+    client, _ = client_factory(
+        lambda request: httpx.Response(200, stream=stream, headers=NDJSON_HEADERS)
+    )
+    token = CancelToken()
+    unregister = token._unregister
+    checked: list[bool] = []
+
+    def unregister_then_try_reset(closer: Any) -> None:
+        unregister(closer)
+        # 确定性停在资源已反登记、外层 except 尚未识别 ReadError 的窗口。
+        with pytest.raises(RuntimeError, match="活动生成"):
+            token.reset()
+        checked.append(True)
+
+    monkeypatch.setattr(token, "_unregister", unregister_then_try_reset)
+    generator = client.stream_chat(
+        model="m", messages=[ChatMessage("user", "hi")], cancel=token
+    )
+    assert next(generator).text == "first"
+    token.cancel()
+    with pytest.raises(CancelledError):
+        next(generator)
+    assert checked
+    token.reset()
+
+
+@pytest.mark.parametrize("partial", [True, False])
+def test_cancelled_eof_is_not_reported_as_network_interruption(
+    client_factory: Any, partial: bool
+) -> None:
+    token = CancelToken()
+
+    class CancelAtEOF(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            if partial:
+                yield _line({"message": {"content": "partial"}, "done": False})
+            token.cancel()
+            return
+
+    client, _ = client_factory(
+        lambda request: httpx.Response(200, stream=CancelAtEOF(), headers=NDJSON_HEADERS)
+    )
+    with pytest.raises(CancelledError):
+        list(client.stream_chat(
+            model="m", messages=[ChatMessage("user", "hi")], cancel=token
+        ))
+    token.reset()
+
+
+def test_cancel_during_http_error_body_preserves_cancelled_error(client_factory: Any) -> None:
+    token = CancelToken()
+
+    class CancelErrorBody(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield from ()
+            token.cancel()
+            raise httpx.ReadError("cancelled error body")
+
+    client, _ = client_factory(
+        lambda request: httpx.Response(500, stream=CancelErrorBody())
+    )
+    with pytest.raises(CancelledError):
+        list(client.stream_chat(
+            model="m", messages=[ChatMessage("user", "hi")], cancel=token
+        ))
+    token.reset()
+
+
+def test_cancelled_registration_remains_active_until_unregistered() -> None:
+    token = CancelToken()
+    closed: list[bool] = []
+
+    def close() -> None:
+        closed.append(True)
+
+    token.cancel()
+    token._register(close)
+    assert closed == [True]
+    with pytest.raises(RuntimeError, match="活动生成"):
+        token.reset()
+    token.cancel()
+    assert closed == [True]
+    token._unregister(close)
+    token.reset()
+
+
+def test_reset_waits_for_cancel_callbacks_to_finish() -> None:
+    token = CancelToken()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def close() -> None:
+        entered.set()
+        release.wait(5)
+
+    token._register(close)
+    thread = threading.Thread(target=token.cancel)
+    thread.start()
+    try:
+        assert entered.wait(2)
+        token._unregister(close)
+        with pytest.raises(RuntimeError, match="活动生成"):
+            token.reset()
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive()
+    token.reset()
+
+
 def test_injected_client_is_not_closed_by_ollama_client(client_factory: Any) -> None:
     client, http = client_factory(lambda request: httpx.Response(200, json={"version": "1"}))
     assert client.is_closed is False

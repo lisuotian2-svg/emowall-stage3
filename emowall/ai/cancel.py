@@ -4,7 +4,7 @@
     * `cancel()` 可从任意线程调用，置位取消标志并关闭已注册的资源
       （当前是 `httpx.Response`，从而中断正在阻塞的读取）；
     * 已取消时再注册资源，会立即关闭该资源，避免「取消发生在注册前」的竞态；
-    * `reset()` 用于复用令牌，调用方必须保证此时没有正在进行的生成；
+    * `reset()` 仅在生成器和取消清理均结束后允许复用令牌；
     * 取消不是网络错误，客户端会把它映射为 `CancelledError`。
 """
 
@@ -26,6 +26,8 @@ class CancelToken:
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._closers: set[Callable[[], None]] = set()
+        self._active_generations = 0
+        self._cancelling = False
 
     @property
     def is_cancelled(self) -> bool:
@@ -38,20 +40,24 @@ class CancelToken:
                 return
             self._event.set()
             closers = tuple(self._closers)
-            self._closers.clear()
+            self._cancelling = True
 
-        for closer in closers:
-            self._safe_close(closer)
+        try:
+            for closer in closers:
+                self._safe_close(closer)
+        finally:
+            with self._lock:
+                self._cancelling = False
 
     def reset(self) -> None:
         """清除取消状态，供下一轮生成复用。
 
-        只允许在没有活动生成时调用：若仍有登记的响应/连接，直接抛
-        `RuntimeError`，避免静默丢取消能力（调用方应先 cancel 或等待生成结束）。
+        生成器（含异常分类）、资源登记或取消清理尚未结束时抛
+        `RuntimeError`。cancel() 只是发起取消，调用方仍须等待旧生成退出。
         """
         with self._lock:
-            if self._closers:
-                raise RuntimeError("有活动生成时不能 reset CancelToken；请先 cancel 或等待生成结束")
+            if self._active_generations or self._closers or self._cancelling:
+                raise RuntimeError("有活动生成或取消清理时不能 reset CancelToken；请等待生成结束")
             self._event.clear()
 
     def raise_if_cancelled(self) -> None:
@@ -62,14 +68,24 @@ class CancelToken:
     # 供传输层使用的内部登记接口
     # ------------------------------------------------------------------
 
+    def _begin_generation(self) -> None:
+        """原子检查取消并登记生命周期，覆盖尚无响应资源的阶段。"""
+        with self._lock:
+            self.raise_if_cancelled()
+            self._active_generations += 1
+
+    def _end_generation(self) -> None:
+        with self._lock:
+            self._active_generations -= 1
+
     def _register(self, closer: Callable[[], None]) -> None:
         """登记一个随取消而执行的清理函数。
 
         若令牌已取消，立刻执行清理函数，保证竞态下资源也会被释放。
         """
         with self._lock:
+            self._closers.add(closer)
             if not self._event.is_set():
-                self._closers.add(closer)
                 return
         self._safe_close(closer)
 

@@ -225,11 +225,11 @@ class OllamaClient:
                 payload["options"] = dict(options)
 
         if cancel is not None:
-            cancel.raise_if_cancelled()
-        self._ensure_open()
-        http_client = self._client
+            cancel._begin_generation()
 
         try:
+            self._ensure_open()
+            http_client = self._client
             # 连接/等待响应头阶段也需要可关闭资源：取消时关闭底层 client，
             # 可立即中断阻塞的 send()；随后由 _ensure_open() 重建。
             owned_client_closer = http_client.close if self._owns_client else None
@@ -250,6 +250,9 @@ class OllamaClient:
         except CancelledError:
             raise
         except AIError:
+            # 取消也可能表现为安静 EOF 或读取错误正文失败，优先保留取消语义。
+            if cancel is not None:
+                cancel.raise_if_cancelled()
             raise
         except httpx.InvalidURL as exc:
             raise ProtocolError(f"Ollama 地址无效：{exc}") from exc
@@ -280,6 +283,10 @@ class OllamaClient:
             if cancel is not None and cancel.is_cancelled:
                 raise CancelledError("生成已取消") from exc
             raise StreamInterruptedError(f"流式响应已关闭：{exc}") from exc
+        finally:
+            # 必须晚于资源反登记和异常分类，否则 reset 可抹掉旧请求的取消状态。
+            if cancel is not None:
+                cancel._end_generation()
 
     # ------------------------------------------------------------------
     # 内部实现
