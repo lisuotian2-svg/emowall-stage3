@@ -926,6 +926,15 @@ def test_context_manager_closes_owned_client() -> None:
     assert client.is_closed is True
 
 
+def test_close_releases_owned_client() -> None:
+    """从 integration 迁移：仅构造和关闭客户端，不进行网络调用。"""
+    instance = OllamaClient()
+    assert instance.is_closed is False
+    instance.close()
+    assert instance.is_closed is True
+    instance.close()
+
+
 def test_base_url_and_timeouts_are_configurable() -> None:
     client = OllamaClient(
         "http://127.0.0.1:12345/",
