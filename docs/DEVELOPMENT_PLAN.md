@@ -110,6 +110,10 @@ Stage 3 仍未获准开始。
   默认测试 **223 passed / 1 skipped / 8 deselected**，严格离线 **221 passed / 1 skipped / 10 deselected**。
   默认测试首次因沙箱回环权限失败，允许本机回环后原样通过；唯一 skipped 为未安装 PySide6。
   取消标志保持至生成器异常分类、资源释放与取消回调均结束；公开 API 不变。
+- G2 已明确所有权与生产工作线程契约；新增 7 个用例验证注入响应头等待限制、
+  外部关闭及上下文管理责任、client/engine 提前关闭生成器的资源释放。
+  客户端 **78 passed**，默认回归 **230 passed / 1 skipped / 8 deselected**，文档与架构 **44 passed**。
+  注入模式的底层取消限制仍然存在；G3 真实时延待测。
 
 **目标**：把「连 Ollama、流式说话、多轮上下文、随时取消」做成与界面无关、可移植的核心。
 
@@ -247,6 +251,11 @@ Stage 3 仍未获准开始。
 **技术要点**
 
 - 主线程只做 UI；`ChatWorker` 通过 `moveToThread` 运行，信号：`chunk(str) / finished(stats, emotion) / failed(str) / cancelled()`。
+- 未来生产工作线程必须独占一个自有 HTTP 客户端的 `OllamaClient`（不传 `client=`），同一实例禁止并发生成。
+  注入客户端仅供测试或明确的外部生命周期管理，响应头前无法保证及时取消，不准用作 GUI 完整取消路径。
+  每轮使用新 `CancelToken`；若复用，必须等旧生成器退出、取消回调结束后才 `reset()`。
+  worker 消费完流或在 `finally` 显式关闭生成器，再发终止信号；下一请求和客户端关闭必须排在旧生成退出之后。
+  TCP/TLS 尚未建连时不承诺立即取消；响应头等待/读块时延由真实 Ollama 验收，不能以假 transport 代替。
 - 数据库工作线程（独立 `QThread`）：`StorageService` 在 `run()` 内打开连接、`finally` 关闭；所有读写经信号投递，主线程不调用 repository。
 - 「生成中」状态：发送键变「停止」，输入框保留可编辑但不可重复发送。
 - 冷启动提示：首块到达前显示「模型加载中…」（因为 qwen3:8b 冷启动约 40 s）。

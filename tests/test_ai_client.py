@@ -24,6 +24,7 @@ from emowall.ai import (
     AIError,
     CancelledError,
     CancelToken,
+    ChatEngine,
     ChatMessage,
     ModelNotFoundError,
     OllamaClient,
@@ -806,6 +807,108 @@ def test_injected_client_is_not_closed_by_ollama_client(client_factory: Any) -> 
     client.close()
     assert client.is_closed is False
     assert http.is_closed is False
+
+
+def test_injected_client_waiting_for_headers_needs_external_release() -> None:
+    transport = HeaderBlockingTransport()
+    token = CancelToken()
+    errors: list[BaseException] = []
+    with httpx.Client(transport=transport) as external:
+        client = OllamaClient("http://mock", client=external)
+
+        def consume() -> None:
+            try:
+                list(client.stream_chat(
+                    model="m", messages=[ChatMessage("user", "hi")], cancel=token
+                ))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=consume)
+        thread.start()
+        try:
+            assert transport.entered.wait(2)
+            token.cancel()
+            client.close()
+            assert not external.is_closed
+            assert not transport.released.is_set()
+            assert thread.is_alive(), "注入模式不能自行中断响应头等待"
+            with pytest.raises(RuntimeError, match="活动生成"):
+                token.reset()
+        finally:
+            transport.released.set()
+            thread.join(2)
+        assert not thread.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], CancelledError), errors
+        token.reset()
+        assert list(client.stream_chat(
+            model="m", messages=[ChatMessage("user", "again")], cancel=token
+        ))[-1].done
+        assert not external.is_closed
+
+
+def test_externally_closed_client_is_not_rebuilt(client_factory: Any) -> None:
+    client, external = client_factory(lambda request: _ndjson([_done()]))
+    external.close()
+    token = CancelToken()
+    with pytest.raises(OllamaUnavailableError, match="注入的 HTTP 客户端已关闭"):
+        list(client.stream_chat(
+            model="m", messages=[ChatMessage("user", "hi")], cancel=token
+        ))
+    token.reset()
+    assert client.is_closed
+
+
+def test_context_manager_leaves_injected_client_usable(client_factory: Any) -> None:
+    client, external = client_factory(
+        lambda request: httpx.Response(200, json={"version": "1"})
+    )
+    with client:
+        assert client.version() == "1"
+    assert not external.is_closed
+    assert client.version() == "1"
+
+
+@pytest.mark.parametrize("through_engine", [True, False])
+@pytest.mark.parametrize("owned", [True, False])
+def test_generator_close_releases_response_and_token(
+    through_engine: bool, owned: bool
+) -> None:
+    streams: list[ChunkStream] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stream = ChunkStream([
+            _line({"message": {"content": "partial"}, "done": False}),
+            _line(_done()),
+        ])
+        streams.append(stream)
+        return httpx.Response(200, stream=stream, headers=NDJSON_HEADERS)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as external:
+        with OllamaClient("http://mock", **(
+            {"transport": transport} if owned else {"client": external}
+        )) as client:
+            token = CancelToken()
+            messages = [ChatMessage("user", "hi")]
+            generator = (
+                ChatEngine(client, model="m").stream_reply(messages, cancel=token)
+                if through_engine else
+                client.stream_chat(model="m", messages=messages, cancel=token)
+            )
+            try:
+                assert next(generator).text == "partial"
+                assert not streams[0].closed
+            finally:
+                generator.close()
+            assert streams[0].closed
+            token.reset()
+            assert not client.is_closed
+            assert not external.is_closed
+            assert list(client.stream_chat(
+                model="m", messages=messages, cancel=token
+            ))[-1].done
+            assert streams[1].closed
 
 
 def test_owned_client_is_closed_and_close_is_idempotent() -> None:

@@ -75,7 +75,16 @@ class OllamaClient:
     """Ollama 传输客户端。
 
     线程模型：同步、阻塞；由调用方（GUI 工作线程）负责不在主线程调用。
-    资源：默认自己创建并关闭 `httpx.Client`；若注入外部 client，则只使用不关闭。
+    生产路径必须使用自有 HTTP 客户端（不传 client），每实例只允许一路请求。
+    自有模式由本类创建和关闭 httpx.Client；取消关闭底层客户端，旧生成退出后
+    下一请求按需重建。等待响应头和读块的实际取消时延须用目标传输实测；
+    TCP/TLS 建连尚未完成时不能保证立即中断，仍受连接超时约束。
+
+    注入 client 仅供测试或明确由外部管理生命周期的调用方使用：本类 close()
+    和取消都不关闭外部客户端，也不重建它；收到响应后会关闭本请求的 Response。
+    等待响应头期间无法保证及时取消，须等待外部请求返回或超时后才报告
+    CancelledError。因此注入模式不满足未来 GUI 生产路径的完整取消要求。
+    自定义 transport 的关闭/可复用行为由提供者保证，不代表默认网络传输行为。
     """
 
     def __init__(
@@ -230,8 +239,8 @@ class OllamaClient:
         try:
             self._ensure_open()
             http_client = self._client
-            # 连接/等待响应头阶段也需要可关闭资源：取消时关闭底层 client，
-            # 可立即中断阻塞的 send()；随后由 _ensure_open() 重建。
+            # 自有模式登记底层 client 以中断已建立连接的等待；实际时延依赖传输。
+            # 注入模式不能关闭外部 client，因此响应头之前没有可中断资源。
             owned_client_closer = http_client.close if self._owns_client else None
             with self._track_closer(cancel, owned_client_closer):
                 with http_client.stream(

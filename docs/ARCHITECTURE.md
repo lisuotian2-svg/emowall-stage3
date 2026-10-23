@@ -89,7 +89,7 @@ class StreamInterruptedError(ProtocolError): ...      # done 前断流
 class CancelledError(AIError): ...                    # 用户取消
 
 class CancelToken:
-    """线程安全取消令牌；cancel() 会关闭已登记的活动响应。"""
+    """线程安全取消令牌；活动生成及取消清理结束前禁止 reset。"""
     def cancel(self) -> None: ...
     def reset(self) -> None: ...
     @property
@@ -97,7 +97,7 @@ class CancelToken:
     def raise_if_cancelled(self) -> None: ...
 
 class OllamaClient:
-    """Ollama HTTP 传输层（同步、流式）。不认识的字段一律忽略。"""
+    """同步流式传输；生产使用自有客户端，注入模式由外部管理生命周期。"""
     def __init__(self, base_url: str = "http://127.0.0.1:11434", *,
                  connect_timeout: float = 5.0, read_timeout: float = 120.0,
                  write_timeout: float = 30.0, pool_timeout: float = 5.0,
@@ -264,14 +264,24 @@ done=true → GenerationStats（或 cancelled / failed）
 
 - **核心同步**：`stream_chat` 是普通生成器，挂在调用线程上阻塞，便于移植与测试。
 - **GUI 侧**：`ChatWorker(QObject)` 通过 `moveToThread(QThread)` 运行；信号 `chunk / finished / failed / cancelled`。
-- **取消**：`CancelToken` 用一个锁保护的登记表保存当前活动的资源；连接/等待响应头阶段登记底层 `httpx.Client`，
-  收到响应后登记 `httpx.Response`。`cancel()` 从任意线程调用 → 置位事件 + 关闭已登记资源。
-  工作线程读取循环捕获 `httpx.ReadError/StreamClosed`，若令牌已取消则抛 `CancelledError`（而非错误弹窗）。
-  生成结束 / 异常时反登记并关闭资源；取消后 owned client 在下一次请求时自动重建，不创建后台任务。
-  冷启动（模型加载 ~40 s）期间取消同样生效，因为关闭的是底层连接（已用真实 Ollama 冷启动探针验证）。
-
+- **取消**：`CancelToken` 分别跟踪活动生成、资源登记和取消清理。自有模式在请求前登记底层
+  `httpx.Client.close`，收到响应后再登记 `httpx.Response.close`；注入模式只登记响应。
+  `cancel()` 从任意线程调用，置位事件并关闭资源，但保留登记直到生成器退出。
+  已取消时的读取错误、安静 EOF、错误正文读取失败优先映射为 `CancelledError`。
+- **复用**：`reset()` 在旧生成器、异常分类、资源登记或取消清理尚未结束时抛 `RuntimeError`。
+  取消发起后必须等旧生成结束；取消关闭的自有客户端在下一次请求时自动重建，不创建后台任务。
+- **所有权**：默认底层客户端由 `OllamaClient` 创建和关闭；外部注入客户端由调用方创建、关闭，
+  `OllamaClient.close()` 不关闭它。注入模式供测试或明确的外部生命周期管理使用，不用于 Stage 5 生产工作线程。
+- **实际边界**：注入模式在响应头之前没有可关闭的响应，不保证及时取消；需要等请求返回、超时
+  或外部管理者中断后才能退出。响应后关闭响应的唤醒时延仍依赖传输。自有模式也不承诺
+  TCP/TLS 建连尚未完成时的统一取消时限；这些限制不能通过文档约定视为底层能力已修复。
 - **不做的**：不在 Qt 线程里跑 `asyncio`；不做线程池并发多路生成（V0.1 单会话单生成）。
-- **资源**：每次生成结束必须 `response.close()`，线程结束 `quit()+wait()`；退出应用时先取消再关库。
+- **资源**：生成器消费完或由消费线程显式 `close()`，通过 `with` 释放响应；提前结束
+  `ChatEngine.stream_reply()` 也须关闭生成器。线程结束 `quit()+wait()`；退出应用时先取消再关库。
+
+> 历史记录（2026-10-23 Stage 2 原交付）：曾报告真实 Ollama 冷启动探针取消约 0.5 s。
+> 这不是普遍时延保证，也不等于本次整改已通过真实验收。G3 将按 1 s 目标重新测量，
+> 当前待实测；离线假传输的及时关闭不能替代真实网络结果。详见 [ADR-0002](adr/0002-ai-core-boundaries-and-cancellation.md)。
 
 ### 5.1 数据库线程归属（长期设计）
 
@@ -285,6 +295,19 @@ done=true → GenerationStats（或 cancelled / failed）
 - 失败处理：DB 线程捕获 `sqlite3.Error` 并发 `storage_error(str)` 信号，界面提示「保存失败」，不中断当前生成；`busy_timeout = 2000`。
 - 关闭顺序：取消生成 → 等待 AI 线程结束 → 投递 `close()` 并等待 DB 线程退出 → 关闭窗口。
 - Stage 0 只定架构；Stage 3 实现无 Qt 的 `storage`，Stage 5 实现 DB 线程封装，均不提前实现。
+
+### 5.2 Stage 5 AI 工作线程契约（未来实现）
+
+- 组合根创建默认自有模式的 `OllamaClient`，不传入外部 `client`；工作线程独占该实例，
+  同一时刻只运行一路生成。生产取消能力以默认真实 HTTP 传输的验收结果为依据。
+- 工作线程消费 `ChatEngine.stream_reply()`，在 `finally` 显式关闭仍未消费完的生成器。
+  先完成生成器清理和取消/错误分类，再发本轮终止信号；下一轮不得与旧生成重叠。
+- 每轮优先使用新 `CancelToken`；若复用旧令牌，必须在旧生成与取消清理全部结束后 `reset()`。
+  `cancel()` 返回或收到 `done` 块都不能代替生成器完成清理的确认。
+- 取消后保留已收到文本，按既定异步数据库流程持久化。退出时先取消并等待 AI 工作线程收尾，
+  再关闭自有客户端；配置变化也须先结束旧请求，再替换客户端。
+- 冷启动显示加载状态，不使用首包短超时；注入模式响应头前取消的限制不得被 UI 宣称为已解决。
+  本节仅规定未来职责，本次整改不实现 GUI 或工作线程。
 
 ---
 
