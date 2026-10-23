@@ -1,6 +1,6 @@
 # EmoWall AI V0.1 架构设计
 
-> 状态：**设计已定稿，代码按阶段落地**（Stage 0 仅骨架）。文中接口为契约草案，实际签名可在实现时微调，
+> 状态：**设计已定稿，Stage 2 AI 核心已落地**。文中接口为契约草案，实际签名可在实现时微调，
 > 但**依赖方向、线程模型、取消语义、数据边界**四项不可变。
 
 ---
@@ -44,6 +44,7 @@
 2. 只有 `emowall/gui/**` 与组合根 `emowall/app.py` 可以 import `PySide6`；`emowall/__init__.py` 不得 import Qt 或 gui/app。
 3. 四层第三方依赖白名单：`ai` 仅 `httpx`，`config / storage / emotion` 仅标准库。
 4. `storage` 不创建线程、不依赖 Qt；SQLite 连接由应用层工作线程独占（见 §5.1）。
+5. `ai` 额外禁止 `sqlite3` / `asyncio`；同步生成器 + `QThread` 工作线程，不叠加事件循环。
 
 ---
 
@@ -52,9 +53,9 @@
 ### 3.1 `emowall/ai`
 
 ```python
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
-from typing import Iterator, Literal, Sequence
+from typing import Literal
 
 Role = Literal["system", "user", "assistant"]
 
@@ -78,37 +79,52 @@ class ChatChunk:
     stats: GenerationStats | None = None
 
 class AIError(Exception): ...
-class OllamaUnavailableError(AIError): ...   # 连接失败 / 5xx
-class ModelNotFoundError(AIError): ...       # 404 / model not found
-class ProtocolError(AIError): ...            # NDJSON 无法解析等
-class CancelledError(AIError): ...           # 用户取消
+class OllamaUnavailableError(AIError): ...            # 服务不可用总类
+class OllamaConnectionError(OllamaUnavailableError): ...  # 连接失败
+class OllamaTimeoutError(OllamaUnavailableError): ...     # 超时
+class OllamaHTTPError(OllamaUnavailableError): ...        # 非 2xx（404 除外）
+class ModelNotFoundError(AIError): ...                # 404 / model not found
+class ProtocolError(AIError): ...                     # JSON / NDJSON 格式错误
+class StreamInterruptedError(ProtocolError): ...      # done 前断流
+class CancelledError(AIError): ...                    # 用户取消
 
 class CancelToken:
-    """线程安全取消令牌。取消后可中断正在读取的 HTTP 响应。"""
+    """线程安全取消令牌；cancel() 会关闭已登记的活动响应。"""
     def cancel(self) -> None: ...
     def reset(self) -> None: ...
     @property
     def is_cancelled(self) -> bool: ...
+    def raise_if_cancelled(self) -> None: ...
 
 class OllamaClient:
     """Ollama HTTP 传输层（同步、流式）。不认识的字段一律忽略。"""
-    def __init__(self, base_url: str, *, connect_timeout: float = 5.0,
-                 read_timeout: float = 120.0, client: httpx.Client | None = None) -> None: ...
+    def __init__(self, base_url: str = "http://127.0.0.1:11434", *,
+                 connect_timeout: float = 5.0, read_timeout: float = 120.0,
+                 write_timeout: float = 30.0, pool_timeout: float = 5.0,
+                 client: httpx.Client | None = None,
+                 transport: httpx.BaseTransport | None = None) -> None: ...
     def version(self) -> str: ...
     def list_models(self) -> list[str]: ...
     def stream_chat(self, *, model: str, messages: Sequence[ChatMessage],
-                    options: dict | None = None, think: bool = False,
+                    options: Mapping[str, object] | None = None,
+                    think: bool = False,
                     cancel: CancelToken | None = None) -> Iterator[ChatChunk]: ...
+    def close(self) -> None: ...
 
 class ChatEngine:
     """对话引擎：上下文裁剪 + 提示组装 + 调用客户端。不含 UI/DB。"""
     def __init__(self, client: OllamaClient, *, model: str,
                  max_context_messages: int = 20, max_context_chars: int = 6000,
-                 system_prompt: str | None = None) -> None: ...
+                 system_prompt: str | None = None,
+                 options: Mapping[str, object] | None = None,
+                 think: bool = False) -> None: ...
     def build_context(self, history: Sequence[ChatMessage]) -> list[ChatMessage]: ...
     def stream_reply(self, history: Sequence[ChatMessage], *,
                      cancel: CancelToken | None = None) -> Iterator[ChatChunk]: ...
 ```
+
+> 实际实现见 `emowall/ai/{errors,models,cancel,client,engine}.py`；设计决策见
+> [ADR-0002](adr/0002-ai-core-boundaries-and-cancellation.md)。
 
 ### 3.2 `emowall/config`
 
@@ -221,8 +237,8 @@ def presentation(emotion: Emotion) -> EmotionPresentation: ...  # 名称/表情/
       │ 投递「写用户消息」给数据库工作线程（异步，不等待返回）
       ▼
 GUI 工作线程（QThread / ChatWorker）
-      │ 1) engine.build_context(界面已加载的历史 + 新消息)
-      │ 2) engine.stream_reply(ctx, cancel=token)
+      │ 1) engine.stream_reply(界面已加载的历史 + 新消息, cancel=token)
+      │    （引擎内部 build_context 完成裁剪，避免重复裁剪）
       ▼
 OllamaClient.stream_chat → POST /api/chat (stream=true)
       │ 每行 NDJSON → ChatChunk → signal chunk(text) ───────► 主线程追加到气泡
@@ -248,9 +264,12 @@ done=true → GenerationStats（或 cancelled / failed）
 
 - **核心同步**：`stream_chat` 是普通生成器，挂在调用线程上阻塞，便于移植与测试。
 - **GUI 侧**：`ChatWorker(QObject)` 通过 `moveToThread(QThread)` 运行；信号 `chunk / finished / failed / cancelled`。
-- **取消**：`CancelToken` 保存当前活动的 `httpx.Response`；`cancel()` 从任意线程调用 → 置位事件 + 关闭响应。
+- **取消**：`CancelToken` 用一个锁保护的登记表保存当前活动的资源；连接/等待响应头阶段登记底层 `httpx.Client`，
+  收到响应后登记 `httpx.Response`。`cancel()` 从任意线程调用 → 置位事件 + 关闭已登记资源。
   工作线程读取循环捕获 `httpx.ReadError/StreamClosed`，若令牌已取消则抛 `CancelledError`（而非错误弹窗）。
-  冷启动（模型加载 ~40 s）期间取消同样生效，因为关闭的是底层连接。
+  生成结束 / 异常时反登记并关闭资源；取消后 owned client 在下一次请求时自动重建，不创建后台任务。
+  冷启动（模型加载 ~40 s）期间取消同样生效，因为关闭的是底层连接（已用真实 Ollama 冷启动探针验证）。
+
 - **不做的**：不在 Qt 线程里跑 `asyncio`；不做线程池并发多路生成（V0.1 单会话单生成）。
 - **资源**：每次生成结束必须 `response.close()`，线程结束 `quit()+wait()`；退出应用时先取消再关库。
 
@@ -271,11 +290,13 @@ done=true → GenerationStats（或 cancelled / failed）
 
 ## 6. 多轮上下文策略
 
-1. 历史消息按时间正序；`system` 提示始终置首。
-2. 裁剪双阈值：`max_context_messages`（条数）+ `max_context_chars`（字符预算），从最旧的成对消息开始丢。
-3. 字符预算估算：CJK 约 1 token/字，英文约 4 字符/token；V0.1 用「字符数」保守近似即可，不做 tokenizer。
-4. 运行时 `num_ctx` 当前为 8192；预算默认 6000 字符，留出系统提示与生成空间。
-5. 裁剪只影响**发送给模型的上下文**，不影响数据库里的完整历史。
+1. 历史消息按时间正序；`system` 提示始终置首，永不裁剪。
+2. 非 system 消息按「用户消息开启一个轮次」分组，从最新轮次向最旧轮次累加；只保留完整轮次，避免孤立的 assistant 回复。
+3. 裁剪双阈值：`max_context_messages`（条数，含 system）+ `max_context_chars`（字符预算，含 system）。
+4. 硬底线：`system` 与最新轮次（含最后一条用户消息）即使单条超预算也保留；其余从最旧轮次开始丢。
+5. 字符预算估算：CJK 约 1 token/字，英文约 4 字符/token；V0.1 用「字符数」保守近似即可，不做 tokenizer，字符数不等于模型 token 数。
+6. 运行时 `num_ctx` 当前为 8192；预算默认 6000 字符，留出系统提示与生成空间。
+7. 裁剪只影响**发送给模型的上下文**，不影响数据库里的完整历史；引擎不持有会话状态。
 
 ---
 

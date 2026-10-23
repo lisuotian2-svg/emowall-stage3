@@ -27,6 +27,7 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 - 只有 `emowall/gui/**` 与组合根 `emowall/app.py` 允许 `import PySide6`；其他任何模块（含 `emowall/__init__.py`）禁止。
 - 四层第三方依赖白名单：`ai` 仅 `httpx`，`config / storage / emotion` 仅标准库。
 - `emowall/ai` 只允许依赖 **标准库 + httpx**；不得 import `PySide6`、`emowall.gui`、`emowall.app`。
+- `emowall/ai` 是同步核心，额外禁止 `sqlite3` / `asyncio`（不叠加数据库与事件循环）。
 - 由 `tests/test_architecture.py` 自动守护上述规则；**新增层必须同步更新该测试**。
 
 ### 2.2 GUI 线程规则
@@ -77,7 +78,8 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 ## 5. 测试规范
 
 - 所有测试放 `tests/`，`$PY -m pytest`（`$PY` = `.\.venv\Scripts\python.exe`）必须**离线可跑**、不依赖真实 Ollama；默认配置已排除 `integration` 用例。
-- 网络层测试用 `httpx.MockTransport` 或自定义假客户端，禁止真实外网调用。
+- 网络层测试用 `httpx.MockTransport` 或自定义假客户端，禁止真实外网调用；`httpx` 仅允许在 `tests/test_ai_client.py` 直接导入用于 MockTransport，其他测试文件禁止直接导入网络客户端。
+- `tests/conftest.py` 默认拦截真实 socket 连接（`integration` / `local_network` 标记例外），保证默认测试离线。
 - 真实 Ollama 的联调测试标记 `@pytest.mark.integration`，默认跳过（`-m integration` 手动运行）。
 - 每个阶段结束必须：`$PY -m pytest` 全绿 **且** 手动验收清单勾完，才允许进入下一阶段。
 - 新功能必须带测试；架构规则改动必须带守护测试。

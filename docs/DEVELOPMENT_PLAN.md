@@ -1,7 +1,7 @@
 # EmoWall AI V0.1 分阶段开发计划
 
 > 原则：**每阶段必须有可复现的验收标准**，验收通过并提交 Git 后才进入下一阶段。
-> 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0、Stage 1 已完成，等待确认进入 Stage 2）。
+> 未经项目负责人确认，不进入任何编码阶段（当前 Stage 0、Stage 1、Stage 2 已完成，等待确认进入 Stage 3）。
 
 **命令约定**：以下命令均在项目根目录执行；`$PY` 表示项目虚拟环境解释器 `.\.venv\Scripts\python.exe`，
 `$UV` 表示 `uv` 命令。本机裸 `python` 与 `py` 可能指向别的解释器，不要使用。
@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | 0 | 环境审计与项目骨架 | 目录、规范、计划、Git | 0.5 天 | ✅ 完成 |
 | 1 | 配置系统 | `emowall/config` | 0.5 天 | ✅ 完成 |
-| 2 | AI 核心 | `emowall/ai` | 1 天 | ⬜ |
+| 2 | AI 核心 | `emowall/ai` | 1 天 | ✅ 完成 |
 | 3 | SQLite 存储 | `emowall/storage` | 0.5 天 | ⬜ |
 | 4 | 情绪系统 | `emowall/emotion` | 0.5 天 | ⬜ |
 | 5 | GUI 集成 | `emowall/gui`、`emowall/app.py` | 1.5 天 | ⬜ |
@@ -94,33 +94,37 @@
 | 4 非法值拒绝写盘 | ✅ | 12 项 `test_invalid_settings_are_rejected`、`test_save_raises_io_error_when_disk_fails` |
 | 5 原子写入 | ✅ | `test_save_leaves_no_temp_files` |
 | 6 EMOWALL_HOME 隔离 | ✅ | `test_emowall_home_isolates_storage` |
-| 7 测试全绿 + 无 Qt | ✅ | `$PY -m pytest`：89 passed / 1 skipped；架构守护测试通过 |
+| 7 测试全绿 + 无 Qt | ✅ | `$PY -m pytest`：97 passed / 1 skipped；架构守护测试通过 |
 
 ---
 
-## Stage 2 — AI 核心
+## Stage 2 — AI 核心 ✅
+
+**状态：✅ 完成（2026-10-23）**
 
 **目标**：把「连 Ollama、流式说话、多轮上下文、随时取消」做成与界面无关、可移植的核心。
 
 **交付物**
 
-- `emowall/ai/errors.py`：`AIError` 及 4 个子类
-- `emowall/ai/models.py`：`ChatMessage / ChatChunk / GenerationStats`
-- `emowall/ai/cancel.py`：`CancelToken`
-- `emowall/ai/client.py`：`OllamaClient`（`version / list_models / stream_chat`，NDJSON 解析）
-- `emowall/ai/engine.py`：`ChatEngine`（上下文裁剪、系统提示、`stream_reply`）
-- `scripts/chat_probe.py`：命令行联调工具（Ctrl+C 取消）
-- `tests/test_ai_client.py`、`tests/test_ai_engine.py`（MockTransport，全部离线）
-- `tests/test_ai_integration.py`（`@pytest.mark.integration`，真实 Ollama，默认跳过）
+- `emowall/ai/errors.py`：`AIError` + 4 个顶层子类；另含 `OllamaConnectionError / OllamaTimeoutError / OllamaHTTPError / StreamInterruptedError` 细分
+- `emowall/ai/models.py`：`ChatMessage / ChatChunk / GenerationStats`（通用消息与流式事件，无 Qt）
+- `emowall/ai/cancel.py`：`CancelToken`（跨线程取消 + 活动响应登记/关闭）
+- `emowall/ai/client.py`：`OllamaClient`（`version / list_models / stream_chat`，NDJSON 解析、错误分类、资源释放）
+- `emowall/ai/engine.py`：`ChatEngine`（上下文裁剪、系统提示、多轮顺序、`stream_reply`）
+- `scripts/chat_probe.py`：命令行联调工具（多轮 `--prompt`、`--list-models`、Ctrl+C 取消）
+- `tests/test_ai_client.py`（61 例）、`tests/test_ai_engine.py`（35 例）、`tests/test_ai_config.py`（6 例）、`tests/test_ai_probe.py`（3 例）——MockTransport / 假客户端 / 自定义 transport，全部离线
+- `tests/test_ai_integration.py`（8 例，`@pytest.mark.integration`，真实 Ollama，默认跳过）
+- `docs/adr/0002-ai-core-boundaries-and-cancellation.md`：AI 核心边界、错误分类、取消与上下文决策
 
 **技术要点**
 
-- `httpx.Client(timeout=httpx.Timeout(connect=..., read=..., write=..., pool=...))`。
-- 流解析：`for line in response.iter_lines()` → `json.loads`；空行跳过；单行解析失败记 warning 不中断（除非整段无有效数据）。
-- `{"error": ...}` → 按状态码/文本分类成 `ModelNotFoundError` 或 `OllamaUnavailableError`。
-- 取消：`CancelToken` 记录活动 response，`cancel()` 置位并 `response.close()`；读循环把 `httpx.ReadError/StreamClosed` + 已取消 → `CancelledError`。
-- 上下文裁剪：先按条数、再按字符预算，从最旧开始丢；`system` 永不丢；最后一条用户消息永不丢。
-- 不做 tokenizer，不做重试风暴（连接失败直接报错，由 UI 提示）。
+- `httpx.Client(timeout=httpx.Timeout(connect=..., read=..., write=..., pool=...))`；本地默认 `trust_env=False`，不自动继承系统代理。
+- 流解析：`response.iter_lines()` → `json.loads`；空行跳过；单行解析失败记 warning 不中断（整段无有效数据才报 `ProtocolError`）；`done=true` 才视为正常完成，EOF 早于 `done` 报 `StreamInterruptedError`。
+- 错误映射：连接失败 → `OllamaConnectionError`；超时 → `OllamaTimeoutError`；404 / `model ... not found` → `ModelNotFoundError`；其他非 2xx → `OllamaHTTPError`；取消 → `CancelledError`。
+- 取消：`CancelToken` 在等待响应头阶段登记底层 `httpx.Client`、收到响应后登记 `httpx.Response`；`cancel()` 关闭活动资源，owned client 下次请求自动重建。等待响应头（冷启动）与读块中都能及时停止，且不会污染下一轮。
+- 上下文裁剪：按「用户消息开启轮次」分组，从最新轮次向最旧轮次累加；条数与字符预算同时生效；`system` 与最新轮次（含最后一条用户消息）为硬底线；字符预算只是 token 的保守近似。
+- 配置方向：`emowall.ai` 不 import `emowall.config`；由组合根读取 `ConfigStore.load().ollama / .chat` 后构造客户端与引擎，配置变化时构造新客户端实例。
+- 不做 tokenizer、不做重试风暴、不引入 asyncio / 后台线程池。
 
 **验收标准**
 
@@ -129,9 +133,27 @@
 3. 取消语义：`token.cancel()` 后生成器在 500 ms 内抛 `CancelledError`，且已产出的块数被准确记录。
 4. 上下文：构造 60 条历史 + 预算 6000 字符，断言发送给 client 的消息满足条数/字符上限，且 system 与最后一条用户消息保留。
 5. 真实联调：启动 Ollama 后 `$PY scripts\chat_probe.py --prompt "你好"` 逐字打印；按 Ctrl+C 立即停止且不打印堆栈。
-6. `$PY -m pytest -m integration`（Ollama 已启动）通过；若当时还没有 integration 用例，退出码 5 属正常（未选到用例）。
+6. `$PY -m pytest -m integration`（Ollama 已启动）通过。
 7. `$PY -c "import emowall.ai"` 在**未安装 PySide6 的纯环境**下可导入（验证核心零 Qt 依赖）。
 8. `git grep -n "PySide6" -- emowall/ai` 无结果。
+
+**验收结果（2026-10-23，Stage 2 完成）**
+
+| 验收项 | 结果 | 证据 |
+| --- | --- | --- |
+| 1 全量离线测试 | ✅ | `$PY -m pytest`：211 passed / 1 skipped（8 个 integration 用例默认 deselect）；`tests/conftest.py` socket 守卫 + MockTransport 证明离线用例零真实外网 |
+| 2 Mock 覆盖 | ✅ | `tests/test_ai_client.py`：分块 / 半行 / 404 / 500 / 连接拒绝 / 超时 / 取消 / 资源释放 |
+| 3 取消语义 | ✅ | `test_cancel_from_another_thread_stops_within_500ms`、`test_cancel_after_two_chunks_raises_and_closes`、`test_cancel_while_waiting_for_response_headers_is_timely`；真实冷启动探针 0.5 s 取消 |
+| 4 上下文 60 条 + 6000 字符 | ✅ | `test_acceptance_context_60_messages_budget_6000`：19 条、字符数 ≤ 6000；`test_char_budget_actually_binds` 单独验证字符预算确实先于条数生效 |
+| 5 真实 probe | ✅ | `scripts\chat_probe.py --list-models` → `qwen3:8b`；`--prompt "请只回复：你好"` → `你好。`，退出码 0 |
+| 6 integration | ✅ | `$PY -m pytest -m integration`：8 passed（版本、模型列表、普通回复、流式顺序、两轮上下文、取消后恢复、未知模型、关闭） |
+| 7 零 Qt 导入 | ✅ | `test_ai_core_imports_with_qt_blocked` 在 Qt 导入被阻断的子进程中成功导入 `emowall.ai` |
+| 8 无 PySide6 引用 | ✅ | `git grep -n "PySide6" -- emowall/ai` 无结果（最终提交前复核） |
+
+**独立评审修复（2026-10-23）**
+
+- P1-1 冷启动/响应头前取消：已修复（登记底层 `httpx.Client`，取消后自动重建；真实冷启动探针 0.5 s）。
+- P2 已处理：3xx 不再当成功、404 仅 `/api/chat` 映射模型缺失、错误文案匹配收窄、`base_url` 拒绝查询/片段、`reset()` 活动态抛错、AI 层新增 `sqlite3/asyncio` 守护、配置测试相对导入展开、integration 去掉脆弱输出断言、新增字符预算绑定用例、subprocess 回环用例加 `local_network` 标记、NDJSON 日志不再输出行内容。
 
 ---
 
@@ -288,3 +310,4 @@
 | 2026-10-22 | 初始计划；完成 Stage 0 |
 | 2026-10-22 | Stage 0 工程修复：统一 Qt 允许范围、数据库改为独立工作线程、统一 Python 3.12 + uv 环境、加强架构/文档/脚本测试 |
 | 2026-10-22 | 完成 Stage 1 配置系统：数据结构与校验、原子读写、损坏恢复、未知字段保留、版本兼容；新增 ADR-0001 |
+| 2026-10-23 | 完成 Stage 2 AI 核心：Ollama 流式传输与 NDJSON 解析、取消令牌、上下文裁剪、错误分类、配置注入、真实联调；新增 ADR-0002 |

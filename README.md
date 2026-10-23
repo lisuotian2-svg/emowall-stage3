@@ -7,13 +7,13 @@
 
 ## 当前状态
 
-**Stage 0（环境审计 + 项目骨架 + 开发规范）与 Stage 1（配置系统）已完成。** 业务功能尚未开始（AI 核心从 Stage 2 起），按约定需经项目负责人确认后进入 Stage 2。
+**Stage 0（环境审计 + 项目骨架 + 开发规范）、Stage 1（配置系统）与 Stage 2（AI 核心）已完成。** 当前可离线验证 AI 核心，GUI 从 Stage 5 开始；按约定需经项目负责人确认后进入 Stage 3。
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Stage 0 | 环境审计、目录结构、规范文档、Git 初始化 | ✅ 完成 |
 | Stage 1 | 配置系统（Ollama 地址/模型、推理与上下文参数、用户数据目录） | ✅ 完成 |
-| Stage 2 | AI 核心（Ollama 传输、流式输出、多轮上下文、取消） | ⬜ |
+| Stage 2 | AI 核心（Ollama 传输、流式输出、多轮上下文、取消） | ✅ 完成 |
 | Stage 3 | SQLite 存储（会话 / 消息） | ⬜ |
 | Stage 4 | 情绪系统（5 种基础表情） | ⬜ |
 | Stage 5 | PySide6 GUI 集成（聊天界面、会话管理、设置） | ⬜ |
@@ -118,9 +118,23 @@ ollama serve          # 或从开始菜单启动 Ollama
 # 5) 跑测试
 .\.venv\Scripts\python.exe -m pytest
 
-# 6) 启动应用（Stage 5 完成后可用）
+# 6) AI 核心联调（无需 GUI；Ctrl+C 可取消）
+.\.venv\Scripts\python.exe scripts\chat_probe.py --prompt "你好"
+
+# 7) 启动应用（Stage 5 完成后可用）
 .\.venv\Scripts\python.exe -m emowall
 ```
+
+### AI 核心（Stage 2）
+
+- 代码：`emowall/ai/{errors,models,cancel,client,engine}.py`，只依赖标准库 + httpx，不依赖 Qt / 配置 / 存储。
+- 消息与事件：`ChatMessage`（system / user / assistant）、`ChatChunk`（增量文本 + done + 统计）、`GenerationStats`。
+- 错误分类：连接失败 / 超时 / 模型不存在 / HTTP 服务错误 / 协议错误 / 流中断 / 用户取消，均为 `AIError` 子类。
+- 上下文：system 与最新轮次优先，条数 + 字符双预算，轮次感知裁剪；字符预算不是 token 数。
+- 配置注入：由组合根读取 `ConfigStore.load().ollama / .chat` 后构造客户端与引擎；AI 模块不 import 配置层。
+- 取消：`CancelToken.cancel()` 可从任意线程调用，关闭活动响应/底层 client；等待响应头（冷启动）与读块中都能及时停止，取消后下一轮使用新令牌即可恢复。
+- 联调：`scripts/chat_probe.py`（`--list-models`、多轮 `--prompt`、Ctrl+C 取消）。
+- 设计决策：[ADR-0002](docs/adr/0002-ai-core-boundaries-and-cancellation.md)。
 
 ---
 
@@ -161,6 +175,7 @@ ollama serve          # 或从开始菜单启动 Ollama
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 分层架构、接口契约、线程与取消模型
 - [docs/ENVIRONMENT_AUDIT.md](docs/ENVIRONMENT_AUDIT.md) — 本机环境审计报告与修复建议
 - [docs/adr/0001-configuration-store.md](docs/adr/0001-configuration-store.md) — ADR-0001：配置存储设计决策
+- [docs/adr/0002-ai-core-boundaries-and-cancellation.md](docs/adr/0002-ai-core-boundaries-and-cancellation.md) — ADR-0002：AI 核心边界、取消与上下文裁剪
 - [AGENTS.md](AGENTS.md) — 长期开发规则（架构铁律、代码 / 测试 / Git 规范）
 
 ---

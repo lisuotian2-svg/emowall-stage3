@@ -23,7 +23,6 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = PROJECT_ROOT / "emowall"
-TESTS_ROOT = PROJECT_ROOT / "tests"
 
 LEAF_LAYERS = ("ai", "config", "storage", "emotion")
 QT_MODULES = ("PySide6", "PySide2", "PyQt6", "PyQt5", "shiboken6", "shiboken2")
@@ -37,8 +36,13 @@ THIRD_PARTY_ALLOWLIST: dict[str, frozenset[str]] = {
     "emotion": frozenset(),
 }
 
-# 单元测试不允许直接引入网络客户端（真实联调放 integration 用例）
-NETWORK_CLIENTS = frozenset({"httpx", "requests", "aiohttp", "urllib3", "websockets"})
+# 单元测试不允许直接引入网络客户端（真实联调放 integration 用例）。
+# httpx 是 AI 层唯一允许的依赖，因此仅在 AI 传输层测试中放行，且必须使用
+# httpx.MockTransport（离线）；其他测试文件仍禁止 import httpx。
+NETWORK_CLIENTS = frozenset({"requests", "aiohttp", "urllib3", "websockets"})
+HTTPX_ALLOWED_TEST_FILES = frozenset({"test_ai_client.py"})
+# ai 是同步核心：额外禁止事件循环与数据库（见 ARCHITECTURE §2）
+AI_FORBIDDEN_STDLIB = frozenset({"sqlite3", "asyncio"})
 
 
 def scan_imports(path: Path, project_root: Path) -> set[str]:
@@ -175,13 +179,45 @@ def test_leaf_layers_use_stdlib_and_allowlisted_third_party_only() -> None:
     assert find_third_party_violations() == []
 
 
+def test_ai_layer_does_not_use_sqlite_or_asyncio() -> None:
+    assert find_ai_forbidden_stdlib() == []
+
+
+def find_ai_forbidden_stdlib(project_root: Path = PROJECT_ROOT) -> list[str]:
+    """ai 层禁止 import sqlite3 / asyncio（同步核心，不叠加事件循环/数据库）。"""
+    violations: list[str] = []
+    for path in sorted((project_root / "emowall" / "ai").rglob("*.py")):
+        for module in sorted(scan_imports(path, project_root)):
+            if top_level(module) in AI_FORBIDDEN_STDLIB:
+                relative = path.relative_to(project_root).as_posix()
+                violations.append(f"{relative} → {module}")
+    return violations
+
+
+def find_test_network_violations(project_root: Path = PROJECT_ROOT) -> list[str]:
+    """测试代码里的网络客户端导入规则。
+
+    * requests / aiohttp / urllib3 / websockets / urllib.request：任何测试都禁止；
+    * httpx：只允许在 AI 传输层测试里使用 MockTransport，其他测试文件禁止。
+    """
+    tests_root = project_root / "tests"
+    if not tests_root.is_dir():
+        return []
+    offenders: list[str] = []
+    for path in sorted(tests_root.rglob("*.py")):
+        allow_httpx = path.name in HTTPX_ALLOWED_TEST_FILES
+        for module in sorted(scan_imports(path, project_root)):
+            top = top_level(module)
+            relative = path.relative_to(project_root).as_posix()
+            if top in NETWORK_CLIENTS or module.startswith("urllib.request"):
+                offenders.append(f"{relative} → {module}")
+            elif top == "httpx" and not allow_httpx:
+                offenders.append(f"{relative} → {module}（httpx 仅允许在 AI 传输层测试中使用 MockTransport）")
+    return offenders
+
+
 def test_unit_tests_do_not_import_network_clients() -> None:
-    offenders = [
-        f"{path.relative_to(PROJECT_ROOT).as_posix()} → {module}"
-        for path in sorted(TESTS_ROOT.rglob("*.py"))
-        for module in sorted(scan_imports(path, PROJECT_ROOT))
-        if top_level(module) in NETWORK_CLIENTS or module.startswith("urllib.request")
-    ]
+    offenders = find_test_network_violations()
     assert offenders == [], "单元测试不得直接访问网络：" + "; ".join(offenders)
 
 
@@ -275,3 +311,30 @@ def test_guard_allows_httpx_in_ai_layer(workdir: Path) -> None:
     """ai 允许直接 import httpx；httpx 内部的 h11/httpcore 不属于项目直接依赖，不扫描。"""
     root = _fake_project(workdir, {"emowall/ai/client.py": "import httpx\n"})
     assert find_third_party_violations(root) == []
+
+
+def test_guard_flags_httpx_in_non_ai_test_file(workdir: Path) -> None:
+    root = _fake_project(workdir, {"tests/test_other.py": "import httpx\n"})
+    violations = find_test_network_violations(root)
+    assert violations and "test_other.py" in violations[0]
+
+
+def test_guard_allows_httpx_only_in_ai_client_test_file(workdir: Path) -> None:
+    root = _fake_project(workdir, {"tests/test_ai_client.py": "import httpx\n"})
+    assert find_test_network_violations(root) == []
+
+
+def test_guard_still_flags_other_network_clients_in_ai_client_test_file(workdir: Path) -> None:
+    root = _fake_project(workdir, {"tests/test_ai_client.py": "import requests\n"})
+    assert find_test_network_violations(root)
+
+
+def test_guard_flags_ai_importing_sqlite_or_asyncio(workdir: Path) -> None:
+    root = _fake_project(
+        workdir,
+        {"emowall/ai/bad.py": "import sqlite3\nimport asyncio\n"},
+    )
+    violations = find_ai_forbidden_stdlib(root)
+    assert violations
+    assert any("sqlite3" in item for item in violations)
+    assert any("asyncio" in item for item in violations)

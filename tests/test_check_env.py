@@ -84,6 +84,7 @@ def test_report_render_marks_strict_mode() -> None:
     assert "结果：" in text
 
 
+@pytest.mark.local_network
 def test_http_json_rejects_non_json_payload() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _HtmlHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -108,6 +109,7 @@ def test_invalid_base_url_exits_one_with_chinese_message() -> None:
     assert "地址无效" in result.stdout
 
 
+@pytest.mark.local_network
 def test_unreachable_service_reports_fail() -> None:
     port = _free_port()
     result = _run("--base-url", f"http://127.0.0.1:{port}")

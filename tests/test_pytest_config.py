@@ -31,8 +31,8 @@ def test_integration_marker_is_declared() -> None:
     assert "integration" in _pytest_section()["markers"]
 
 
-def test_integration_selection_collects_nothing_by_default() -> None:
-    """当前没有 integration 用例：显式选择应为空（pytest 返回 5），而不是误跑离线用例。"""
+def test_integration_selection_only_collects_integration_tests() -> None:
+    """显式 `-m integration` 只收集真实 Ollama 用例，不误跑离线用例。"""
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-m", "integration", "--collect-only", "-q"],
         cwd=PROJECT_ROOT,
@@ -43,5 +43,23 @@ def test_integration_selection_collects_nothing_by_default() -> None:
         timeout=120,
     )
     combined = result.stdout + result.stderr
-    assert result.returncode == 5, combined
-    assert "test_" not in combined, f"不应收集到任何用例，实际输出：{combined!r}"
+    assert result.returncode == 0, combined
+    assert "test_ai_integration.py" in combined, combined
+    assert "test_ai_client.py" not in combined, "integration 选择不应收集离线用例"
+    assert "test_ai_engine.py" not in combined, "integration 选择不应收集离线用例"
+
+
+def test_default_selection_excludes_integration_tests() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "test_ai_integration.py" not in combined, "默认选择不得收集 integration 用例"
+    assert "test_ai_client.py" in combined, combined
