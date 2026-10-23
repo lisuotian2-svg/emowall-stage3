@@ -7,13 +7,13 @@
 
 ## 当前状态
 
-**Stage 0（环境审计 + 项目骨架 + 开发规范）、Stage 1（配置系统）与 Stage 2（AI 核心）已完成。** 当前可离线验证 AI 核心，GUI 从 Stage 5 开始；按约定需经项目负责人确认后进入 Stage 3。
+**Stage 0、Stage 1 已完成；Stage 2 的 G1–G4 整改已交付并经 DeepSeek 续接复验，等待独立复审与用户确认。** 当前可离线验证 AI 核心，GUI 从 Stage 5 开始；Stage 3 尚未获准开始。详见 [Stage 2 整改交付总结](docs/STAGE2_REMEDIATION.md)。
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Stage 0 | 环境审计、目录结构、规范文档、Git 初始化 | ✅ 完成 |
 | Stage 1 | 配置系统（Ollama 地址/模型、推理与上下文参数、用户数据目录） | ✅ 完成 |
-| Stage 2 | AI 核心（Ollama 传输、流式输出、多轮上下文、取消） | ✅ 完成 |
+| Stage 2 | AI 核心（Ollama 传输、流式输出、多轮上下文、取消） | 整改已复验，待独立复审 |
 | Stage 3 | SQLite 存储（会话 / 消息） | ⬜ |
 | Stage 4 | 情绪系统（5 种基础表情） | ⬜ |
 | Stage 5 | PySide6 GUI 集成（聊天界面、会话管理、设置） | ⬜ |
@@ -132,7 +132,9 @@ ollama serve          # 或从开始菜单启动 Ollama
 - 错误分类：连接失败 / 超时 / 模型不存在 / HTTP 服务错误 / 协议错误 / 流中断 / 用户取消，均为 `AIError` 子类。
 - 上下文：system 与最新轮次优先，条数 + 字符双预算，轮次感知裁剪；字符预算不是 token 数。
 - 配置注入：由组合根读取 `ConfigStore.load().ollama / .chat` 后构造客户端与引擎；AI 模块不 import 配置层。
-- 取消：`CancelToken.cancel()` 可从任意线程调用，关闭活动响应/底层 client；等待响应头（冷启动）与读块中都能及时停止，取消后下一轮使用新令牌即可恢复。
+- 取消：`CancelToken.cancel()` 关闭活动响应及自有 HTTP 客户端；旧生成器和取消清理全部退出前禁止 `reset()`。提前停止消费必须显式关闭生成器，下一轮须等旧生成结束。
+- 所有权：未来生产路径使用自有客户端、独占单路生成；注入客户端由外部负责关闭，响应头前不保证及时取消。真实默认传输已通过本机冷启动 1 秒目标验收，TCP/TLS 建连及其他传输环境不作相同时延承诺。
+- 测试：默认组含 2 项本机回环 `local_network` 测试；严格零网络使用 `-m "not integration and not local_network"`。真实 integration 共 10 项，完整重跑需先确认无其他任务并满足模型未驻留的冷启动前置条件，操作见整改总结。
 - 联调：`scripts/chat_probe.py`（`--list-models`、多轮 `--prompt`、Ctrl+C 取消）。
 - 设计决策：[ADR-0002](docs/adr/0002-ai-core-boundaries-and-cancellation.md)。
 

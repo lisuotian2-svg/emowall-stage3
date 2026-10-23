@@ -10,7 +10,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = PROJECT_ROOT / "README.md"
 AGENTS = PROJECT_ROOT / "AGENTS.md"
-DOC_FILES = [README, AGENTS, *sorted((PROJECT_ROOT / "docs").glob("*.md"))]
+DOC_FILES = [README, AGENTS, *sorted((PROJECT_ROOT / "docs").rglob("*.md"))]
 LAYER_DIRS = ("ai", "config", "storage", "emotion", "gui")
 
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")

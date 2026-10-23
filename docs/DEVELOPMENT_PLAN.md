@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | 0 | 环境审计与项目骨架 | 目录、规范、计划、Git | 0.5 天 | ✅ 完成 |
 | 1 | 配置系统 | `emowall/config` | 0.5 天 | ✅ 完成 |
-| 2 | AI 核心 | `emowall/ai` | 1 天 | ✅ 完成 |
+| 2 | AI 核心 | `emowall/ai` | 1 天 | 整改已复验，待独立复审 |
 | 3 | SQLite 存储 | `emowall/storage` | 0.5 天 | ⬜ |
 | 4 | 情绪系统 | `emowall/emotion` | 0.5 天 | ⬜ |
 | 5 | GUI 集成 | `emowall/gui`、`emowall/app.py` | 1.5 天 | ⬜ |
@@ -98,9 +98,9 @@
 
 ---
 
-## Stage 2 — AI 核心 ✅
+## Stage 2 — AI 核心（整改已复验，待独立复审）
 
-**状态：整改中（2026-10-23，独立审查 CONDITIONAL PASS）**
+**状态：G1–G4 整改交付并经 DeepSeek 续接复验，等待独立复审与用户确认（2026-10-23；上次结论 CONDITIONAL PASS）**
 
 本次按 G1 取消令牌竞态 → G2 HTTP 所有权 → G3 真实集成验收 → G4 文档同步执行，
 每项独立测试、审查与提交。下方原始验收记录保留为历史证据，不能代替本次复测。
@@ -113,7 +113,7 @@ Stage 3 仍未获准开始。
 - G2 已明确所有权与生产工作线程契约；新增 7 个用例验证注入响应头等待限制、
   外部关闭及上下文管理责任、client/engine 提前关闭生成器的资源释放。
   客户端 **78 passed**，默认回归 **230 passed / 1 skipped / 8 deselected**，文档与架构 **44 passed**。
-  注入模式的底层取消限制仍然存在；G3 真实时延待测。
+  此为 G2 检查点记录；当时 G3 真实时延待测，现见下项。注入模式的底层取消限制仍然存在。
 - G3 已实测：Ollama 0.40.6、qwen3:8b，测试前两次采样无模型驻留/活动连接。
   关闭测试迁入离线组，新增冷启动取消、连续 3 次取消恢复、真实生成器提前关闭。
   最终 G3 integration **10 passed / 0 skipped / 233 deselected（9.55 s）**；
@@ -121,7 +121,13 @@ Stage 3 仍未获准开始。
   连续取消 **0.000405 / 0.000440 / 0.000403 s**，每轮恢复成功。
   默认 **232 passed / 1 skipped / 10 deselected**，严格离线 **230 passed / 1 skipped / 12 deselected**。
   记录首次测试辅助函数解包错误导致 **1 failed / 9 passed**，修正后重跑；该失败不作为取消时延证据。
-  HTTP 响应、旧连接、池中请求及最终客户端清理检查通过。G4 待同步最终交付材料。
+  HTTP 响应、旧连接、池中请求及最终客户端清理检查通过。
+- G4 已同步当前状态、历史结果、所有权及限制；最终命令、数量、耗时与复审要点见
+  [Stage 2 整改交付总结](STAGE2_REMEDIATION.md)。上面 G1–G3 数量属于各提交时的检查点，不能代替最终结果。
+  最终默认 **244 passed / 1 skipped / 10 deselected**，严格离线 **242 passed / 1 skipped / 12 deselected**；
+  真实 integration **10 passed / 0 skipped / 245 deselected（8.27 s）**，最终冷启动取消 **0.000438 s**。
+  取消/资源专项 **27 passed**，架构 **22 passed**，文档 **34 passed**。DeepSeek 续接复验重跑六组命令，五组计数一致；
+  真实 integration 冷启动取消 **0.000431 s / 0.000651 s**（两轮），详见整改总结 §11。尚待独立复审和用户确认，Stage 3 未开始。
 
 **目标**：把「连 Ollama、流式说话、多轮上下文、随时取消」做成与界面无关、可移植的核心。
 
@@ -133,8 +139,8 @@ Stage 3 仍未获准开始。
 - `emowall/ai/client.py`：`OllamaClient`（`version / list_models / stream_chat`，NDJSON 解析、错误分类、资源释放）
 - `emowall/ai/engine.py`：`ChatEngine`（上下文裁剪、系统提示、多轮顺序、`stream_reply`）
 - `scripts/chat_probe.py`：命令行联调工具（多轮 `--prompt`、`--list-models`、Ctrl+C 取消）
-- `tests/test_ai_client.py`（61 例）、`tests/test_ai_engine.py`（35 例）、`tests/test_ai_config.py`（6 例）、`tests/test_ai_probe.py`（3 例）——MockTransport / 假客户端 / 自定义 transport，全部离线
-- `tests/test_ai_integration.py`（8 例，`@pytest.mark.integration`，真实 Ollama，默认跳过）
+- `tests/test_ai_client.py`（79 例）、`tests/test_ai_engine.py`（35 例）、`tests/test_ai_config.py`（6 例）、`tests/test_ai_probe.py`（3 例）——MockTransport / 假客户端 / 自定义 transport，全部离线
+- `tests/test_ai_integration.py`（10 例，`@pytest.mark.integration`，真实 Ollama，默认 deselect；原来 8 例中有 1 例纯本地关闭测试，现已移出并新增 3 例真实测试）
 - `docs/adr/0002-ai-core-boundaries-and-cancellation.md`：AI 核心边界、错误分类、取消与上下文决策
 
 **技术要点**
@@ -142,23 +148,23 @@ Stage 3 仍未获准开始。
 - `httpx.Client(timeout=httpx.Timeout(connect=..., read=..., write=..., pool=...))`；本地默认 `trust_env=False`，不自动继承系统代理。
 - 流解析：`response.iter_lines()` → `json.loads`；空行跳过；单行解析失败记 warning 不中断（整段无有效数据才报 `ProtocolError`）；`done=true` 才视为正常完成，EOF 早于 `done` 报 `StreamInterruptedError`。
 - 错误映射：连接失败 → `OllamaConnectionError`；超时 → `OllamaTimeoutError`；404 / `model ... not found` → `ModelNotFoundError`；其他非 2xx → `OllamaHTTPError`；取消 → `CancelledError`。
-- 取消：`CancelToken` 在等待响应头阶段登记底层 `httpx.Client`、收到响应后登记 `httpx.Response`；`cancel()` 关闭活动资源，owned client 下次请求自动重建。等待响应头（冷启动）与读块中都能及时停止，且不会污染下一轮。
+- 取消：自有模式登记底层 `httpx.Client`，两种模式在收到响应后登记 `httpx.Response`；`cancel()` 不清空登记，生成器退出及取消清理结束后才允许 `reset()`。自有客户端取消后下轮重建，注入模式响应头前不保证及时取消；生产契约见 Stage 5。
 - 上下文裁剪：按「用户消息开启轮次」分组，从最新轮次向最旧轮次累加；条数与字符预算同时生效；`system` 与最新轮次（含最后一条用户消息）为硬底线；字符预算只是 token 的保守近似。
 - 配置方向：`emowall.ai` 不 import `emowall.config`；由组合根读取 `ConfigStore.load().ollama / .chat` 后构造客户端与引擎，配置变化时构造新客户端实例。
 - 不做 tokenizer、不做重试风暴、不引入 asyncio / 后台线程池。
 
 **验收标准**
 
-1. `$PY -m pytest` 全绿（默认已排除 integration），且**全程无真实网络**（可用断网复跑验证）。
+1. `$PY -m pytest` 通过（默认排除 integration，包含 2 项回环网络测试）；严格零网络另运行 `$PY -m pytest -m "not integration and not local_network"`，保留 socket 守卫。
 2. Mock 用例覆盖：正常多块拼接、`done` 统计字段、`error` 字段、HTTP 404/500、连接拒绝、半行断流、取消发生在第 2 块之后。
-3. 取消语义：`token.cancel()` 后生成器在 500 ms 内抛 `CancelledError`，且已产出的块数被准确记录。
+3. 离线假传输取消仍要求 500 ms 内抛 `CancelledError`；真实默认传输冷启动按本次审查的 1 s 目标测试，记录阶段、已产出块数、线程退出和资源清理。不同所有权/传输的限制必须明示。
 4. 上下文：构造 60 条历史 + 预算 6000 字符，断言发送给 client 的消息满足条数/字符上限，且 system 与最后一条用户消息保留。
 5. 真实联调：启动 Ollama 后 `$PY scripts\chat_probe.py --prompt "你好"` 逐字打印；按 Ctrl+C 立即停止且不打印堆栈。
 6. `$PY -m pytest -m integration`（Ollama 已启动）通过。
 7. `$PY -c "import emowall.ai"` 在**未安装 PySide6 的纯环境**下可导入（验证核心零 Qt 依赖）。
 8. `git grep -n "PySide6" -- emowall/ai` 无结果。
 
-**验收结果（2026-10-23，Stage 2 完成）**
+**历史验收结果（2026-10-23，Stage 2 原交付；保留，不代表本次整改结果）**
 
 | 验收项 | 结果 | 证据 |
 | --- | --- | --- |
@@ -171,7 +177,7 @@ Stage 3 仍未获准开始。
 | 7 零 Qt 导入 | ✅ | `test_ai_core_imports_with_qt_blocked` 在 Qt 导入被阻断的子进程中成功导入 `emowall.ai` |
 | 8 无 PySide6 引用 | ✅ | `git grep -n "PySide6" -- emowall/ai` 无结果（最终提交前复核） |
 
-**独立评审修复（2026-10-23）**
+**历史独立评审修复（2026-10-23，原交付；编号属于当时审查，非本次 G1–G4）**
 
 - P1-1 冷启动/响应头前取消：已修复（登记底层 `httpx.Client`，取消后自动重建；真实冷启动探针 0.5 s）。
 - P2 已处理：3xx 不再当成功、404 仅 `/api/chat` 映射模型缺失、错误文案匹配收窄、`base_url` 拒绝查询/片段、`reset()` 活动态抛错、AI 层新增 `sqlite3/asyncio` 守护、配置测试相对导入展开、integration 去掉脆弱输出断言、新增字符预算绑定用例、subprocess 回环用例加 `local_network` 标记、NDJSON 日志不再输出行内容。
@@ -337,3 +343,4 @@ Stage 3 仍未获准开始。
 | 2026-10-22 | Stage 0 工程修复：统一 Qt 允许范围、数据库改为独立工作线程、统一 Python 3.12 + uv 环境、加强架构/文档/脚本测试 |
 | 2026-10-22 | 完成 Stage 1 配置系统：数据结构与校验、原子读写、损坏恢复、未知字段保留、版本兼容；新增 ADR-0001 |
 | 2026-10-23 | 完成 Stage 2 AI 核心：Ollama 流式传输与 NDJSON 解析、取消令牌、上下文裁剪、错误分类、配置注入、真实联调；新增 ADR-0002 |
+| 2026-10-23 | DeepSeek 续接复验：保护未提交的 G4 文档、重跑六组命令、补完 G4 提交；未进入 Stage 3 |

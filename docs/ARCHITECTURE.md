@@ -280,8 +280,9 @@ done=true → GenerationStats（或 cancelled / failed）
   `ChatEngine.stream_reply()` 也须关闭生成器。线程结束 `quit()+wait()`；退出应用时先取消再关库。
 
 > 历史记录（2026-10-23 Stage 2 原交付）：曾报告真实 Ollama 冷启动探针取消约 0.5 s。
-> 这不是普遍时延保证，也不等于本次整改已通过真实验收。G3 将按 1 s 目标重新测量，
-> 当前待实测；离线假传输的及时关闭不能替代真实网络结果。详见 [ADR-0002](adr/0002-ai-core-boundaries-and-cancellation.md)。
+> 这不是普遍时延保证。本次 G3/G4 真实默认传输 10 项通过，冷启动取消 0.000491 s / 0.000438 s；
+> DeepSeek 续接重跑为 0.000431 s / 0.000651 s（两轮），仍按 1 s 目标断言；最终复测见 [整改交付总结](STAGE2_REMEDIATION.md)。
+> 离线假传输不能替代真实网络结果，注入模式限制见 [ADR-0002](adr/0002-ai-core-boundaries-and-cancellation.md)。
 
 ### 5.1 数据库线程归属（长期设计）
 
