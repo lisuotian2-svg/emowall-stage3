@@ -215,6 +215,22 @@ def test_wrong_type_falls_back_per_field(store: ConfigStore, caplog: pytest.LogC
     assert "num_ctx" in caplog.text
 
 
+def test_invalid_config_value_is_not_logged(
+    store: ConfigStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    private_value = "sample-private-value"
+    _write_config(
+        store,
+        {"version": CURRENT_CONFIG_VERSION, "ollama": {"base_url": private_value}},
+    )
+    with caplog.at_level(logging.WARNING, logger="emowall.config"):
+        settings = store.load()
+
+    assert settings.ollama.base_url == AppSettings().ollama.base_url
+    assert "ollama.base_url" in caplog.text
+    assert private_value not in caplog.text
+
+
 def test_corrupt_backup_does_not_overwrite_when_backup_fails(
     store: ConfigStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

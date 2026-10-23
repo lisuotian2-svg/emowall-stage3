@@ -192,14 +192,11 @@ class ConfigStore:
                 continue
             try:
                 kwargs[name] = validator(raw[name])
-            except ConfigValidationError as exc:
+            except ConfigValidationError:
                 logger.warning(
-                    "invalid value for %s.%s (%r); using default %r [%s]",
+                    "invalid value for %s.%s; using default",
                     section,
                     name,
-                    raw[name],
-                    default,
-                    exc,
                 )
                 kwargs[name] = default
         return kwargs
