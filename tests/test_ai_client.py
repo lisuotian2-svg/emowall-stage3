@@ -211,6 +211,16 @@ def test_http_500_is_service_error(client_factory: Any) -> None:
     assert "boom" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_auth_failure_preserves_http_status(client_factory: Any, status_code: int) -> None:
+    client, _ = client_factory(
+        lambda request: httpx.Response(status_code, json={"error": "access denied"})
+    )
+    with pytest.raises(OllamaHTTPError) as excinfo:
+        list(client.stream_chat(model="m", messages=[ChatMessage("user", "hi")]))
+    assert excinfo.value.status_code == status_code
+
+
 def test_http_redirect_is_error(client_factory: Any) -> None:
     client, _ = client_factory(
         lambda request: httpx.Response(302, json={"version": "9.9.9"})
