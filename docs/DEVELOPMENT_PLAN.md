@@ -186,7 +186,7 @@ Stage 3 仍未获准开始。
 
 ## Stage 3 — SQLite 存储
 
-**状态**：接口契约 v1.2 已冻结（2026-10-23，标签 `stage3-contract-v1.2`），独立审查三轮 PASS；实现待授权。
+**状态**：v1.2 接口已冻结，v1.3 时间戳契约已获批准并实施；Task 6 与 Stage 3 Storage 代码快照于 2026-10-25 独立最终验收 PASS。Git 提交/集成及后续阶段仍待项目负责人另行授权。
 
 **目标**：会话与消息可靠落盘，重启后可恢复；存储层完全不知道 AI 的存在。
 
@@ -215,6 +215,10 @@ Stage 3 仍未获准开始。
 6. 同一会话第 1 条用户消息自动生成标题（≤ 20 字），空内容回退为「新会话」。
 7. 并发场景最小验证：两个独立线程各持一个连接交替读写，不报 `database is locked`（WAL + busy_timeout=2000 生效）；同一连接跨线程使用应抛 `ProgrammingError`（证明 `check_same_thread=True` 未被关闭）。
 8. `$PY -m pytest` 全绿；`grep -rn "PySide6\|httpx" emowall/storage` 无结果。
+
+**Task 6 独立验收结果（2026-10-25）**
+
+上述八项均 PASS。固定的 70 文件快照 manifest SHA-256 为 `c017add6a74af9093d88383dd5e1af3cd037656324ffe9ee40718abae35e30fb`；全项目默认离线测试 663 PASS、1 项因当前环境缺少 PySide6 而 SKIP、10 项真实 Ollama integration 按配置未选中；独立真实 SQLite/时间戳探针 50/50 PASS；Storage 禁用依赖的原文字面检索零命中。验收只针对代码快照，不表示已执行 Git 提交/集成、Stage 4/5 开发或完整 GUI 验收。
 
 ---
 

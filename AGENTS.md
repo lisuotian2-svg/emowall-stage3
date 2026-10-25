@@ -138,3 +138,5 @@ emowall/{ai, storage, emotion, config} ──►  互不 import，也不 import 
 4. `docs/DEVELOPMENT_PLAN.md` 状态已更新；
 5. 已提交 Git，工作区干净；
 6. 向项目负责人报告：做了什么、证据、已知限制、下一步。
+
+对于独立审查发现的可复现缺陷，开发 Agent 应先编写能够暴露缺陷的回归测试，修复后再次运行，并向审查 Agent 提供前后测试证据。
