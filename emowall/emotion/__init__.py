@@ -7,3 +7,16 @@
 依赖约束：仅标准库；纯函数、确定性、无 I/O。
 禁止：import PySide6、httpx、sqlite3，禁止 import 其他 emowall 层。
 """
+
+from __future__ import annotations
+
+from .detector import EmotionResult, detect_emotion
+from .labels import Emotion, EmotionPresentation, presentation
+
+__all__ = [
+    "Emotion",
+    "EmotionResult",
+    "EmotionPresentation",
+    "detect_emotion",
+    "presentation",
+]

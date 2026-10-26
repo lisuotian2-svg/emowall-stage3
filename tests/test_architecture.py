@@ -5,6 +5,8 @@
     2. 只有 `emowall/gui/**` 与组合根 `emowall/app.py` 允许 import Qt 绑定库；
     3. 四层只允许标准库 + 白名单第三方库（ai 仅 httpx，其余为空）；
     4. `emowall/__init__.py` 不得拉起 GUI。
+    5. emotion 的禁用依赖检查是**有限静态检查**（直接 import + `print`/`open` 调用），
+       不证明不存在间接 I/O 路径（D13 已批准此限制）。
 
 检查对象是**项目源码里的直接 import 语句**；第三方库自身的传递依赖（如 httpx 依赖的
 h11/httpcore）不扫描、也不算违规。
@@ -43,6 +45,11 @@ NETWORK_CLIENTS = frozenset({"requests", "aiohttp", "urllib3", "websockets"})
 HTTPX_ALLOWED_TEST_FILES = frozenset({"test_ai_client.py"})
 # ai 是同步核心：额外禁止事件循环与数据库（见 ARCHITECTURE §2）
 AI_FORBIDDEN_STDLIB = frozenset({"sqlite3", "asyncio"})
+# emotion 是纯函数层：禁止 I/O、网络、数据库与文件路径依赖（见 AGENTS §3、契约 §2）
+EMOTION_FORBIDDEN_STDLIB = frozenset(
+    {"sqlite3", "socket", "http", "urllib", "ssl", "subprocess", "pathlib"}
+)
+EMOTION_FORBIDDEN_CALLS = frozenset({"print", "open"})
 
 
 def scan_imports(path: Path, project_root: Path) -> set[str]:
@@ -183,6 +190,14 @@ def test_ai_layer_does_not_use_sqlite_or_asyncio() -> None:
     assert find_ai_forbidden_stdlib() == []
 
 
+def test_emotion_layer_has_no_io_network_or_database_imports() -> None:
+    assert find_emotion_forbidden_imports() == []
+
+
+def test_emotion_layer_has_no_print_or_open_calls() -> None:
+    assert find_emotion_forbidden_calls() == []
+
+
 def find_ai_forbidden_stdlib(project_root: Path = PROJECT_ROOT) -> list[str]:
     """ai 层禁止 import sqlite3 / asyncio（同步核心，不叠加事件循环/数据库）。"""
     violations: list[str] = []
@@ -191,6 +206,33 @@ def find_ai_forbidden_stdlib(project_root: Path = PROJECT_ROOT) -> list[str]:
             if top_level(module) in AI_FORBIDDEN_STDLIB:
                 relative = path.relative_to(project_root).as_posix()
                 violations.append(f"{relative} → {module}")
+    return violations
+
+
+def find_emotion_forbidden_imports(project_root: Path = PROJECT_ROOT) -> list[str]:
+    """emotion 层禁止 I/O / 网络 / 数据库标准库（纯函数，不读文件、不发请求）。"""
+    violations: list[str] = []
+    for path in sorted((project_root / "emowall" / "emotion").rglob("*.py")):
+        for module in sorted(scan_imports(path, project_root)):
+            if top_level(module) in EMOTION_FORBIDDEN_STDLIB:
+                relative = path.relative_to(project_root).as_posix()
+                violations.append(f"{relative} → {module}")
+    return violations
+
+
+def find_emotion_forbidden_calls(project_root: Path = PROJECT_ROOT) -> list[str]:
+    """emotion 层不得调用 print / open（无调试输出、无文件 I/O）。"""
+    violations: list[str] = []
+    for path in sorted((project_root / "emowall" / "emotion").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in EMOTION_FORBIDDEN_CALLS
+            ):
+                relative = path.relative_to(project_root).as_posix()
+                violations.append(f"{relative}:{node.lineno} → {node.func.id}()")
     return violations
 
 
@@ -338,3 +380,28 @@ def test_guard_flags_ai_importing_sqlite_or_asyncio(workdir: Path) -> None:
     assert violations
     assert any("sqlite3" in item for item in violations)
     assert any("asyncio" in item for item in violations)
+
+
+def test_guard_flags_emotion_importing_io_or_database(workdir: Path) -> None:
+    root = _fake_project(
+        workdir,
+        {
+            "emowall/emotion/bad.py": (
+                "import sqlite3\nimport socket\nfrom pathlib import Path\n"
+            )
+        },
+    )
+    violations = find_emotion_forbidden_imports(root)
+    assert any("sqlite3" in item for item in violations)
+    assert any("socket" in item for item in violations)
+    assert any("pathlib" in item for item in violations)
+
+
+def test_guard_flags_emotion_print_and_open(workdir: Path) -> None:
+    root = _fake_project(
+        workdir,
+        {"emowall/emotion/bad.py": "def f():\n    print('x')\n    return open('y')\n"},
+    )
+    violations = find_emotion_forbidden_calls(root)
+    assert any("print()" in item for item in violations)
+    assert any("open()" in item for item in violations)

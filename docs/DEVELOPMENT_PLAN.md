@@ -226,9 +226,8 @@ Stage 3 仍未获准开始。
 
 **目标**：把回复文本映射成 5 种基础表情，纯函数、确定性、可单测，为未来壁纸提供情绪信号。
 
-**状态（2026-10-25）**：已获本轮 Stage 4 实施授权（隔离工作区 + `feature/stage4-emotion-core`）。
-契约草案与逐例黄金样本见 [contracts/stage4-emotion-v1.md](contracts/stage4-emotion-v1.md)；
-公共语义与词典内容待项目负责人裁决后再编码，未冻结接口不视为已批准。
+**状态（2026-10-26）**：负责人 D01–D18 裁决完成；候选实现与开发者测试完成；独立审查 CONDITIONAL PASS；C1–C4 整改中；尚未正式验收、尚未冻结契约、Stage 5 未授权。
+契约与黄金样本见 [contracts/stage4-emotion-v1.md](contracts/stage4-emotion-v1.md)。
 
 **交付物**
 
